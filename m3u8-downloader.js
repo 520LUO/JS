@@ -2,7 +2,7 @@
 // @name         M3U8媒体下载器
 // @namespace    https://github.com/520luo/js/m3u8-downloader
 // @version      5.3.0
-// @description  悬浮球可拖动，多线程下载，智能模式，目录记忆，手动释放内存，面板点击外部关闭
+// @description  多线程下载,智能模式,边下边存
 // @author       520LUO
 // @match        *://*/*
 // @grant        GM_xmlhttpRequest
@@ -11,6 +11,8 @@
 // @connect      *
 // @run-at       document-idle
 // @license      MIT
+// @downloadURL https://update.greasyfork.org/scripts/584352/M3U8%E5%AA%92%E4%BD%93%E4%B8%8B%E8%BD%BD%E5%99%A8.user.js
+// @updateURL https://update.greasyfork.org/scripts/584352/M3U8%E5%AA%92%E4%BD%93%E4%B8%8B%E8%BD%BD%E5%99%A8.meta.js
 // ==/UserScript==
 
 (function() {
