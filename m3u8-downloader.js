@@ -3,7 +3,7 @@
 // @namespace    https://github.com/520luo/js/m3u8-downloader
 // @version      5.3.0
 // @description  多线程下载,智能模式,边下边存
-// @icon         data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAACAAAAAgCAYAAABzenr0AAAACXBIWXMAAAsTAAALEwEAmpwYAAAAhklEQVR4Ae3UAQkAMRDDUPsPOhLcOwPuhb1hyAfhBcTv+Q0bG38DB1e2A8oOOHaAOAHhCPYD+g9Iv4D2CagvID2C+gLyIygfoP0C8geID6A8gPoDyC+gPoDyAugPID0C8gvIDyA+gPoAyAfgPoB6AOg/gP0B1gcgH4D4A8j/A8C8gcAGj/Bg5xAJIAAAAASUVORK5CYII=
+// @icon         https://raw.githubusercontent.com/520LUO/icons/refs/heads/main/M3U8.png
 // @author       520LUO
 // @match        *://*/*
 // @grant        GM_xmlhttpRequest
