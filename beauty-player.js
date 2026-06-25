@@ -3,7 +3,7 @@
 // @namespace    https://githb.com/520luo/js
 // @version      1.9.0
 // @description  iOS 风格高斯模糊玻璃视频控件，倍速菜单自适应视频大小，m3u8嗅探
-// @author       carvenxi
+// @author       520luo
 // @match        *://*/*
 // @run-at       document-idle
 // @grant        GM_setClipboard
