@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Cloudflare 站点检测 (Trace + DNS 目标IP + ECS + 边缘归属)
 // @namespace    https://github.com/52luo/js/cf-detector
-// @version      6.2
+// @version      6.2.1
 // @description  检测 Cloudflare CDN，解析当前网站IP（ECS），显示本机 IP、边缘归属（国旗/代号/国名）
 // @author       520LUO
 // @match        *://*/*
@@ -365,8 +365,8 @@
     }
 
     function getStatus(data) {
-        if (!data.cf) return { text: '无 Cloudflare', dot: '🔴', color: '#ef4444' };
-        if (data.trace) return { text: 'Cloudflare 正常', dot: '🟢', color: '#18a058' };
+        if (!data.cf) return { text: '非Cloudflare站点', dot: '🔴', color: '#ef4444' };
+        if (data.trace) return { text: 'Cloudflare站点', dot: '🟢', color: '#18a058' };
         return { text: 'Cloudflare 已启用', dot: '🟡', color: '#f59e0b' };
     }
 
