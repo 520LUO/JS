@@ -452,7 +452,7 @@
 
         // 目标 IP 列表
         if (data.cf && data.targetIPs.length > 0) {
-            html += `<div style="margin-top:12px;"><div style="font-weight:bold; font-size:12px; color:#444; margin-bottom:6px;"> CF DOH解析的目标IP (${data.targetIPs.length})</div>`;
+            html += `<div style="margin-top:12px;"><div style="font-weight:bold; font-size:12px; color:#444; margin-bottom:6px;"> CF DOH解析到的目标IP (${data.targetIPs.length})</div>`;
             html += `<div style="padding-left:4px;">`;
             data.targetIPs.forEach(ip => {
                 const info = data.ipInfoCache[ip];
