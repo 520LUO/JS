@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Cloudflare 站点检测 (Trace + DNS 目标IP + ECS + 边缘归属)
 // @namespace    https://github.com/52luo/js/cf-detector
-// @version      6.2.2
+// @version      6.2.3
 // @description  检测 Cloudflare CDN，解析当前网站IP（ECS），显示本机 IP、边缘归属（国旗/代号/国名）
 // @author       520LUO
 // @match        *://*/*
@@ -17,7 +17,7 @@
 
     // ==================== 用户配置 ====================
     const DNS_RESOLVER_URL = 'https://cloudflare-dns.com/dns-query'; // 或 Google: https://dns.google/resolve
-    const IPINFO_API_TEMPLATE = 'http://ip-api.com/json/${ip}?lang=zh-CN';
+    const IPINFO_API_TEMPLATE = 'https://api.db-ip.com/v2/free/${ip}';
     const CACHE_KEY = 'cf_trace_dns_cache';
     const CACHE_TTL = 30000;
     // ==================== 配置结束 ====================
@@ -287,14 +287,10 @@
                 try {
                     if (resp.status !== 200) return resolve({ error: `HTTP ${resp.status}` });
                     const data = JSON.parse(resp.responseText);
-                    // 优先 ip-api.com 格式
-                    if (data.country) {
-                        resolve({ info: [data.country, data.city].filter(Boolean).join(', '), countryCode: data.countryCode || '' });
-                        return;
-                    }
-                    // 兼容 freeipapi
+                    // db-ip.com free 返回: countryName, city (可能为空)
                     if (data.countryName) {
-                        resolve({ info: [data.countryName, data.cityName].filter(Boolean).join(', '), countryCode: data.countryCode || '' });
+                        const parts = [data.countryName, data.city].filter(Boolean);
+                        resolve({ info: parts.join(', '), countryCode: data.countryCode || '' });
                         return;
                     }
                     resolve({ error: '格式异常' });
@@ -304,6 +300,7 @@
             ontimeout: () => resolve({ error: '超时' })
         });
     });
+    }
 }
 
     // ---------- 主检测 ----------
