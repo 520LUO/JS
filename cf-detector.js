@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Cloudflare 站点检测 (Trace + DNS 目标IP + ECS + 边缘归属)
 // @namespace    https://github.com/52luo/js/cf-detector
-// @version      6.2.3
+// @version      6.3
 // @description  检测 Cloudflare CDN，解析当前网站IP（ECS），显示本机 IP、边缘归属（国旗/代号/国名）
 // @author       520LUO
 // @match        *://*/*
