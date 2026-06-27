@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Cloudflare 站点检测 (Trace + DNS 目标IP + ECS + 边缘归属)
 // @namespace    https://github.com/52luo/js/cf-detector
-// @version      6.2.1
+// @version      6.2.2
 // @description  检测 Cloudflare CDN，解析当前网站IP（ECS），显示本机 IP、边缘归属（国旗/代号/国名）
 // @author       520LUO
 // @match        *://*/*
@@ -17,7 +17,7 @@
 
     // ==================== 用户配置 ====================
     const DNS_RESOLVER_URL = 'https://cloudflare-dns.com/dns-query'; // 或 Google: https://dns.google/resolve
-    const IPINFO_API_TEMPLATE = 'https://freeipapi.com/api/json/${ip}';
+    const IPINFO_API_TEMPLATE = 'http://ip-api.com/json/${ip}?lang=zh-CN';
     const CACHE_KEY = 'cf_trace_dns_cache';
     const CACHE_TTL = 30000;
     // ==================== 配置结束 ====================
@@ -276,31 +276,35 @@
 
     // ---------- 归属地查询 ----------
     function getIPInfo(ip) {
-        return new Promise((resolve) => {
-            const url = IPINFO_API_TEMPLATE.replace('${ip}', ip);
-            GM.xmlHttpRequest({
-                method: 'GET',
-                url: url,
-                headers: { 'Accept': 'application/json' },
-                timeout: 8000,
-                onload: function(resp) {
-                    try {
-                        if (resp.status !== 200) return resolve({ error: `HTTP ${resp.status}` });
-                        const data = JSON.parse(resp.responseText);
-                        const countryCode = data.countryCode || '';
-                        if (data.countryName) {
-                            const parts = [data.countryName, data.cityName].filter(Boolean);
-                            resolve({ info: parts.join(', '), countryCode });
-                            return;
-                        }
-                        resolve({ error: '格式异常' });
-                    } catch (e) { resolve({ error: '解析失败' }); }
-                },
-                onerror: () => resolve({ error: '网络错误' }),
-                ontimeout: () => resolve({ error: '超时' })
-            });
+    return new Promise((resolve) => {
+        const url = IPINFO_API_TEMPLATE.replace('${ip}', ip);
+        GM.xmlHttpRequest({
+            method: 'GET',
+            url: url,
+            headers: { 'Accept': 'application/json' },
+            timeout: 8000,
+            onload: function(resp) {
+                try {
+                    if (resp.status !== 200) return resolve({ error: `HTTP ${resp.status}` });
+                    const data = JSON.parse(resp.responseText);
+                    // 优先 ip-api.com 格式
+                    if (data.country) {
+                        resolve({ info: [data.country, data.city].filter(Boolean).join(', '), countryCode: data.countryCode || '' });
+                        return;
+                    }
+                    // 兼容 freeipapi
+                    if (data.countryName) {
+                        resolve({ info: [data.countryName, data.cityName].filter(Boolean).join(', '), countryCode: data.countryCode || '' });
+                        return;
+                    }
+                    resolve({ error: '格式异常' });
+                } catch (e) { resolve({ error: '解析失败' }); }
+            },
+            onerror: () => resolve({ error: '网络错误' }),
+            ontimeout: () => resolve({ error: '超时' })
         });
-    }
+    });
+}
 
     // ---------- 主检测 ----------
     async function detectAll() {
