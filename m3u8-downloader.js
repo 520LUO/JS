@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         M3U8媒体下载器
 // @namespace    https://github.com/520luo/js/m3u8-downloader
-// @version      5.4.0
+// @version      5.4.1
 // @description  智能嗅探,自定义多线程下载,智能模式,边下边存,精美UI
 // @icon         https://raw.githubusercontent.com/520LUO/icons/refs/heads/main/M3U8.png
 // @author       520LUO
