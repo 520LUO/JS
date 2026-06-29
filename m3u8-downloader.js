@@ -25,7 +25,7 @@
     const FINAL_RETRY_ROUNDS = 2;           // 全部下载完后对失败片段集中重试的轮数
     const REQUEST_TIMEOUT = 10000;          // 单个请求超时时间（毫秒）
     const SIZE_THRESHOLD = 800 * 1024 * 1024; // 800MB，超过此大小使用磁盘边下边存
-    const ESTIMATED_BITRATE = 1.5 * 1024 * 1024; // 1.5Mbps 估算码率
+    const ESTIMATED_BITRATE = 1.4 * 1024 * 1024; // 1.5Mbps 估算码率
     const BALL_SIZE = 36;                   // 悬浮球尺寸
 
     let savedDirHandle = null;              // 磁盘模式下缓存的目录句柄
@@ -49,6 +49,7 @@
             touch-action: none;
             transition: box-shadow 0.2s, transform 0.15s;
             transform: scale(1);
+            
         }
         #m3u8-drag-ball:active { cursor: grabbing; transform: scale(0.92); }
         #m3u8-drag-ball:hover {
