@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         M3U8媒体下载器
 // @namespace    https://github.com/520luo/js/m3u8-downloader
-// @version      5.3.0
-// @description  多线程下载,智能模式,边下边存
+// @version      5.3.1
+// @description  智能嗅探,自定义多线程下载,智能模式,边下边存,精美UI
 // @icon         https://raw.githubusercontent.com/520LUO/icons/refs/heads/main/M3U8.png
 // @author       520LUO
 // @match        *://*/*
@@ -25,14 +25,14 @@
     const FINAL_RETRY_ROUNDS = 2;           // 全部下载完后对失败片段集中重试的轮数
     const REQUEST_TIMEOUT = 10000;          // 单个请求超时时间（毫秒）
     const SIZE_THRESHOLD = 800 * 1024 * 1024; // 800MB，超过此大小使用磁盘边下边存
-    const ESTIMATED_BITRATE = 2 * 1024 * 1024; // 2Mbps 估算码率
+    const ESTIMATED_BITRATE = 1.5 * 1024 * 1024; // 1.5Mbps 估算码率
     const BALL_SIZE = 36;                   // 悬浮球尺寸
     const PANEL_WIDTH = 340;                // 面板宽度
 
     let savedDirHandle = null;              // 磁盘模式下缓存的目录句柄
     let currentDownload = null;             // 当前下载任务实例
 
-    // ========== 玻璃 UI 样式 ==========
+    // ==========  UI 样式 ==========
     const CSS = `
         #m3u8-drag-ball {
             position: fixed; width: ${BALL_SIZE}px; height: ${BALL_SIZE}px; border-radius: 50%;
@@ -102,6 +102,10 @@
             color: rgba(255,255,255,0.6); flex-shrink: 0;
             border-right: 1px solid rgba(255,255,255,0.1);
             cursor: pointer; transition: all 0.15s;
+        }
+        .input-icon-right {
+            border-right: none;
+            border-left: 1px solid rgba(255,255,255,0.1);
         }
         .input-icon:hover { background: rgba(255,255,255,0.1); color: #fff; }
         .input-icon:active { transform: scale(0.92); }
@@ -221,6 +225,7 @@
     // ========== SVG 图标 ==========
     const ICONS = {
         link: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/></svg>`,
+        refresh: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M23 4v6h-6"/><path d="M1 20v-6h6"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10"/><path d="M20.49 15a9 9 0 0 1-14.85 3.36L1 14"/></svg>`,
         download: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v12"/><path d="M7 10l5 5 5-5"/><path d="M4 19h16"/></svg>`,
         pause: `<svg viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="4" width="4" height="16"/><rect x="14" y="4" width="4" height="16"/></svg>`,
         play: `<svg viewBox="0 0 24 24" fill="currentColor"><path d="M8 5v14l11-7z"/></svg>`,
@@ -738,8 +743,9 @@
         panel.className = 'm3u8-panel';
         panel.innerHTML = `
             <div class="input-group">
-                <div class="input-icon" id="link-icon" title="点击复制链接">${ICONS.link}</div>
-                <input class="m3u8-input" type="text" placeholder="m3u8 链接（自动嗅探）" id="url-input">
+                <div class="input-icon" id="link-icon" title="复制链接">${ICONS.link}</div>
+               <input class="m3u8-input" type="text" placeholder="m3u8 链接（自动嗅探）" id="url-input">
+               <div class="input-icon input-icon-right" id="refresh-icon" title="重新嗅探">${ICONS.refresh}</div>
             </div>
             <div class="thread-row">
                 <span class="thread-label">线程</span>
@@ -783,7 +789,22 @@
                 setTimeout(() => { st.textContent = '就绪'; }, 1500);
             }
         });
-
+        //刷新链接
+        const refreshIcon = panel.querySelector('#refresh-icon');
+        refreshIcon.addEventListener('click', (e) => {
+            e.stopPropagation();
+            const newUrl = sniffM3u8();
+            if (newUrl) {
+                urlInput.value = newUrl;
+                panel.querySelector('#status-text').textContent = '✅ 已更新链接';
+                ball.classList.add('has-url');
+            } else {
+                panel.querySelector('#status-text').textContent = '⚠️ 未检测到 M3U8 链接';
+            }
+            setTimeout(() => {
+                panel.querySelector('#status-text').textContent = '就绪';
+            }, 1500);
+          });
         // 线程选择
         let selThreads = 16;
         const chips = panel.querySelectorAll('.thread-chip');
