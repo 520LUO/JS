@@ -70,7 +70,7 @@
         .m3u8-panel {
             position: fixed;
             /* ★ 改动1：自适应宽度，最小340px，最大560px，随屏幕缩放 */
-            width: clamp(340px, 35vw, 560px);
+            width: clamp(340px, 35vw, 580px);
             max-height: 70vh;   /* 最大高度为视口高度的70% */
             overflow-y: auto;    /* 内容超出时滚动 */
             background: rgba(20,20,30,0.75);
