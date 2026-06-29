@@ -67,7 +67,7 @@
 
         .m3u8-panel {
             position: fixed;
-            width: clamp(280px, 30vw, 500px);
+            width: clamp(330px, 40vw, 800px);
             max-height: 70vh;
             overflow-y: auto;
             background: rgba(20,20,30,0.75);
