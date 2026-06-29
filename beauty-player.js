@@ -37,8 +37,8 @@
   const PROCESSED_ATTR = `data-${NS}-done`;
   const SKIP_SECONDS = 10;     // 快进/快退秒数
   const SEEK_STEP = 5;         // 进度条键盘左右键的步进秒数
-  const MIN_SIZE = 80;         // 低于此尺寸（px）的 video 视为装饰性/不可见，跳过美化
-  const HIDE_DELAY = 2800;     // 播放中无操作多久后自动隐藏控制层（ms）
+  const MIN_SIZE = 130;         // 低于此尺寸（px）的 video 视为装饰性/不可见，跳过美化
+  const HIDE_DELAY = 3800;     // 播放中无操作多久后自动隐藏控制层（ms）
   const SPEED_OPTIONS = [0.5, 0.75, 1, 1.25, 1.5, 1.75, 2, 2.5, 3]; // 更多菜单里的倍速选项
 
   /* =========================================================
