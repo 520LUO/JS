@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         M3U8媒体下载器
 // @namespace    https://github.com/520luo/js/m3u8-downloader
-// @version      5.4.4
-// @description  智能嗅探,自定义多线程下载,智能模式,边下边存,精美UI
+// @version      26.06.30.1
+// @description  智能嗅探,自定义多线程下载,智能模式,边下边存,精美UI,片段顺序修复
 // @icon         https://raw.githubusercontent.com/520LUO/icons/refs/heads/main/M3U8.png
 // @author       520LUO
 // @match        *://*/*
@@ -25,7 +25,7 @@
     const FINAL_RETRY_ROUNDS = 2;           // 全部下载完后对失败片段集中重试的轮数
     const REQUEST_TIMEOUT = 10000;          // 单个请求超时时间（毫秒）
     const SIZE_THRESHOLD = 500 * 1024 * 1024; // 500MB，超过此大小使用磁盘边下边存
-    const ESTIMATED_BITRATE = 1.55 * 1024 * 1024; // 1.55Mbps 估算码率
+    const ESTIMATED_BITRATE = 1.5 * 1024 * 1024; // 1.5Mbps 估算码率
     const BALL_SIZE = 36;                   // 悬浮球尺寸
 
     let savedDirHandle = null;              // 磁盘模式下缓存的目录句柄
@@ -49,7 +49,6 @@
             touch-action: none;
             transition: box-shadow 0.2s, transform 0.15s;
             transform: scale(1);
-            
         }
         #m3u8-drag-ball:active { cursor: grabbing; transform: scale(0.92); }
         #m3u8-drag-ball:hover {
@@ -70,10 +69,9 @@
 
         .m3u8-panel {
             position: fixed;
-            /* ★ 改动1：自适应宽度，最小340px，最大560px，随屏幕缩放 */
-            width: clamp(310px, 32vw, 580px);
-            max-height: 70vh;   /* 最大高度为视口高度的70% */
-            overflow-y: auto;    /* 内容超出时滚动 */
+            width: clamp(320px, 35vw, 580px);   /* 自适应宽度 */
+            max-height: 70vh;                    /* 最大高度为视口高度的70% */
+            overflow-y: auto;                    /* 内容超出时滚动 */
             background: rgba(20,20,30,0.75);
             backdrop-filter: blur(24px) saturate(180%);
             -webkit-backdrop-filter: blur(24px) saturate(180%);
@@ -423,7 +421,7 @@
             this.mode = 'memory';       // 'memory' 或 'disk'
             this.writable = null;
             this.dirHandle = null;
-            this.memoryBlobs = [];      // 内存模式下的 Blob 数组
+            this.segmentBlobs = [];      // 按索引存储的 Blob 数组（顺序修复）
             this.currentFilename = '';
             this.previousFilename = '';
             this.segments = [];
@@ -487,6 +485,9 @@
                 const sizeEst = this.totalDuration > 0 ? `预估 ${(this.estimatedSize/1024/1024).toFixed(0)}MB` : '无法预估时长';
                 modeInfo.textContent = `💡 ${modeLabel} · ${sizeEst}`;
 
+                // ★ 初始化顺序存储数组（片段顺序修复的关键）
+                this.segmentBlobs = new Array(this.total).fill(null);
+
                 // 磁盘模式准备
                 if (this.mode === 'disk') {
                     try {
@@ -511,11 +512,11 @@
                     statusText.textContent = `📥 初始化段...`;
                     const blob = await downloadSegment(this.mapUri, this.url, null);
                     if (this.mode === 'disk') await this.writable.write(blob);
-                    else this.memoryBlobs.push(blob);
+                    else this.segmentBlobs[0] = blob;  // 初始化段放在索引0（或者单独处理，此处简化）
                 }
 
-                // 3. 准备下载队列
-                this.queue = this.segments.slice();
+                // 3. 准备下载队列（带索引）
+                this.queue = this.segments.map((url, i) => ({ url, idx: i }));
                 this.completed = 0;
                 this.bytes = 0;
                 this.startTime = Date.now();
@@ -537,6 +538,23 @@
                     speedText.textContent = `${spd} KB/s`;
                 };
 
+                // ★ 下载单个片段，按索引存入 segmentBlobs
+                const downloadOne = async (segUrl, idx) => {
+                    try {
+                        const blob = await downloadSegment(segUrl, this.url, this.abortController.signal);
+                        if (this.paused) return;
+                        this.segmentBlobs[idx] = blob;  // 关键：按索引存储，保证顺序
+                        this.bytes += blob.size;
+                        this.completed++;
+                        updateProgress();
+                    } catch (err) {
+                        if (err.message === 'aborted') return;
+                        this.failed.push({ url: segUrl, idx });
+                        this.completed++;
+                        updateProgress();
+                    }
+                };
+
                 // 4. 多线程下载
                 const workers = [];
                 for (let i = 0; i < this.concurrency; i++) {
@@ -546,28 +564,9 @@
                                 await new Promise(r => setTimeout(r, 200));
                                 continue;
                             }
-                            const segUrl = this.queue.shift();
-                            if (!segUrl) continue;
-                            try {
-                                const blob = await downloadSegment(segUrl, this.url, this.abortController.signal);
-                                if (this.paused) {
-                                    this.queue.unshift(segUrl);
-                                    continue;
-                                }
-                                if (this.mode === 'disk') await this.writable.write(blob);
-                                else this.memoryBlobs.push(blob);
-                                this.bytes += blob.size;
-                                this.completed++;
-                                updateProgress();
-                            } catch (err) {
-                                if (err.message === 'aborted') {
-                                    this.queue.unshift(segUrl);
-                                    continue;
-                                }
-                                this.failed.push({ url: segUrl, idx: this.completed });
-                                this.completed++;
-                                updateProgress();
-                            }
+                            const seg = this.queue.shift();
+                            if (!seg) continue;
+                            await downloadOne(seg.url, seg.idx);
                         }
                     })());
                 }
@@ -589,18 +588,11 @@
                                 const item = retryList.shift();
                                 try {
                                     const blob = await downloadSegment(item.url, this.url, this.abortController.signal);
-                                    if (this.paused) {
-                                        retryList.unshift(item);
-                                        continue;
-                                    }
-                                    if (this.mode === 'disk') await this.writable.write(blob);
-                                    else this.memoryBlobs.push(blob);
+                                    if (this.paused) return;
+                                    this.segmentBlobs[item.idx] = blob;  // 重试成功也按索引存入
                                     this.bytes += blob.size;
                                 } catch (err) {
-                                    if (err.message === 'aborted') {
-                                        retryList.unshift(item);
-                                        continue;
-                                    }
+                                    if (err.message === 'aborted') return;
                                     this.failed.push(item);
                                 }
                             }
@@ -627,7 +619,11 @@
 
                 // 6. 完成或失败处理
                 if (this.failed.length === 0) {
-                    // 成功
+                    // 检查是否有未下载的片段（null）
+                    const missingIndex = this.segmentBlobs.findIndex(b => b === null);
+                    if (missingIndex !== -1) throw new Error(`片段 ${missingIndex} 丢失`);
+
+                    // 成功：删除旧文件（如果有）
                     if (this.previousFilename && this.dirHandle) {
                         try { await this.dirHandle.removeEntry(this.previousFilename); } catch(_) {}
                     }
@@ -642,10 +638,16 @@
                     downloadBtn.innerHTML = ICONS.download;
 
                     if (this.mode === 'disk') {
+                        // 磁盘模式：按索引顺序写入文件
+                        this.writable = await (await this.dirHandle.getFileHandle(this.currentFilename, { create: true })).createWritable();
+                        for (const blob of this.segmentBlobs) {
+                            await this.writable.write(blob);
+                        }
+                        await this.writable.close();
                         statusText.textContent = `✅ 完成：${this.currentFilename} (${fileSizeMB}MB)`;
                     } else {
-                        // 内存模式：触发下载
-                        const finalBlob = new Blob(this.memoryBlobs, { type: 'video/mp4' });
+                        // 内存模式：按顺序合并 Blob 并触发下载
+                        const finalBlob = new Blob(this.segmentBlobs, { type: 'video/mp4' });
                         const blobUrl = URL.createObjectURL(finalBlob);
                         const a = document.createElement('a');
                         a.href = blobUrl;
@@ -687,6 +689,8 @@
                 if (!this.paused) {
                     currentDownload = null;
                 }
+                // 清理 segmentBlobs 引用，帮助 GC
+                this.segmentBlobs = null;
             }
         }
 
@@ -707,8 +711,8 @@
         // 手动释放内存
         manualCleanup() {
             let releasedSize = 0;
-            if (this.memoryBlobs && this.memoryBlobs.length > 0) {
-                releasedSize = this.memoryBlobs.reduce((sum, b) => sum + (b?.size || 0), 0);
+            if (this.segmentBlobs) {
+                releasedSize = this.segmentBlobs.reduce((s, b) => s + (b?.size || 0), 0);
             } else {
                 releasedSize = this.bytes;
             }
@@ -721,9 +725,9 @@
 
         // 清理内部引用
         cleanup() {
-            if (this.memoryBlobs) {
-                this.memoryBlobs.forEach(b => b = null);
-                this.memoryBlobs = null;
+            if (this.segmentBlobs) {
+                this.segmentBlobs.forEach(b => b = null);
+                this.segmentBlobs = null;
             }
             this.queue = null;
             this.segments = null;
@@ -916,7 +920,7 @@
             }
         });
 
-        // ★ 改动2：自适应定位函数，替代原有的固定宽度定位
+        // ★ 自适应定位函数
         function positionPanel() {
             const ballRect = ball.getBoundingClientRect();
             const panelWidth = panel.getBoundingClientRect().width;
