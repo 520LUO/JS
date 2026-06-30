@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         M3U8媒体下载器
 // @namespace    https://github.com/520luo/js/m3u8-downloader
-// @version      26.06.30.2
-// @description  智能嗅探,多线程下载,智能模式,边下边存,修复视频无法打开,磁盘模式串行可靠下载
+// @version      5.3.8
+// @description  智能嗅探,多线程下载,智能模式,边下边存,修复视频无法打开,语法修正
 // @icon         https://raw.githubusercontent.com/520LUO/icons/refs/heads/main/M3U8.png
 // @author       520LUO
 // @match        *://*/*
@@ -21,209 +21,120 @@
 
     // ========== 常量配置 ==========
     const CONCURRENCY_OPTIONS = [8, 16, 32, 64];
-    const MAX_RETRIES = 3;                  // 内存模式每个片段的重试次数
-    const FINAL_RETRY_ROUNDS = 2;           // 内存模式集中重试轮数
-    const DISK_RETRIES = 9999;              // 磁盘模式单个片段的无限重试
-    const REQUEST_TIMEOUT = 10000;          // 单个请求超时时间（毫秒）
-    const SIZE_THRESHOLD = 800 * 1024 * 1024; // 800MB，超过此大小使用磁盘边下边存
-    const ESTIMATED_BITRATE = 1.55 * 1024 * 1024; // 1.5Mbps 估算码率
-    const BALL_SIZE = 36;                   // 悬浮球尺寸
+    const MAX_RETRIES = 3;
+    const FINAL_RETRY_ROUNDS = 2;
+    const REQUEST_TIMEOUT = 10000;
+    const SIZE_THRESHOLD = 800 * 1024 * 1024;
+    const ESTIMATED_BITRATE = 1.5 * 1024 * 1024;
+    const BALL_SIZE = 36;
 
-    let savedDirHandle = null;              // 磁盘模式下缓存的目录句柄
-    let currentDownload = null;             // 当前下载任务实例
+    let savedDirHandle = null;
+    let currentDownload = null;
 
     // ==========  UI 样式 ==========
     const CSS = `
         #m3u8-drag-ball {
             position: fixed; width: ${BALL_SIZE}px; height: ${BALL_SIZE}px; border-radius: 50%;
             background: rgba(20,20,30,0.65);
-            backdrop-filter: blur(16px) saturate(180%);
-            -webkit-backdrop-filter: blur(16px) saturate(180%);
+            backdrop-filter: blur(16px) saturate(180%); -webkit-backdrop-filter: blur(16px) saturate(180%);
             border: 1px solid rgba(255,255,255,0.28);
-            box-shadow: 0 4px 18px rgba(0,0,0,0.25),
-                        inset 0 1px 0 rgba(255,255,255,0.18),
-                        0 0 10px rgba(255,255,255,0.15);
-            cursor: grab; display: none;
-            align-items: center; justify-content: center;
-            color: #fff; font-size: 18px;
-            z-index: 2147483646; user-select: none;
-            touch-action: none;
-            transition: box-shadow 0.2s, transform 0.15s;
-            transform: scale(1);
+            box-shadow: 0 4px 18px rgba(0,0,0,0.25), inset 0 1px 0 rgba(255,255,255,0.18), 0 0 10px rgba(255,255,255,0.15);
+            cursor: grab; display: none; align-items: center; justify-content: center;
+            color: #fff; font-size: 18px; z-index: 2147483646; user-select: none;
+            touch-action: none; transition: box-shadow 0.2s, transform 0.15s; transform: scale(1);
         }
         #m3u8-drag-ball:active { cursor: grabbing; transform: scale(0.92); }
         #m3u8-drag-ball:hover {
-            box-shadow: 0 6px 24px rgba(0,0,0,0.35),
-                        inset 0 1px 0 rgba(255,255,255,0.22),
-                        0 0 18px rgba(255,255,255,0.3);
+            box-shadow: 0 6px 24px rgba(0,0,0,0.35), inset 0 1px 0 rgba(255,255,255,0.22), 0 0 18px rgba(255,255,255,0.3);
         }
         #m3u8-drag-ball::after {
-            content: '';
-            position: absolute; top: 0; right: 0;
-            width: 8px; height: 8px;
-            border-radius: 50%; background: transparent;
-            transition: background 0.2s;
+            content: ''; position: absolute; top: 0; right: 0; width: 8px; height: 8px;
+            border-radius: 50%; background: transparent; transition: background 0.2s;
         }
         #m3u8-drag-ball.has-url::after { background: #30d158; }
         #m3u8-drag-ball.done::after { background: #007aff; }
         #m3u8-drag-ball.error::after { background: #ff3b30; }
 
         .m3u8-panel {
-            position: fixed;
-            width: clamp(320px, 35vw, 580px);   /* 自适应宽度 */
-            max-height: 70vh;                    /* 最大高度为视口高度的70% */
-            overflow-y: auto;                    /* 内容超出时滚动 */
-            background: rgba(20,20,30,0.75);
-            backdrop-filter: blur(24px) saturate(180%);
-            -webkit-backdrop-filter: blur(24px) saturate(180%);
-            border: 1px solid rgba(255,255,255,0.22);
-            border-radius: 18px; padding: 16px;
-            box-shadow: 0 14px 32px rgba(0,0,0,0.4),
-                        inset 0 1px 0 rgba(255,255,255,0.15);
-            color: #fff;
-            font-family: system-ui, -apple-system, sans-serif;
-            opacity: 0; pointer-events: none;
-            transform: translateY(6px) scale(0.96);
-            transition: opacity 0.2s ease, transform 0.25s cubic-bezier(.34,1.56,.64,1);
-            z-index: 2147483645;
+            position: fixed; width: clamp(340px, 35vw, 560px); max-height: 70vh; overflow-y: auto;
+            background: rgba(20,20,30,0.75); backdrop-filter: blur(24px) saturate(180%); -webkit-backdrop-filter: blur(24px) saturate(180%);
+            border: 1px solid rgba(255,255,255,0.22); border-radius: 18px; padding: 16px;
+            box-shadow: 0 14px 32px rgba(0,0,0,0.4), inset 0 1px 0 rgba(255,255,255,0.15);
+            color: #fff; font-family: system-ui, -apple-system, sans-serif;
+            opacity: 0; pointer-events: none; transform: translateY(6px) scale(0.96);
+            transition: opacity 0.2s ease, transform 0.25s cubic-bezier(.34,1.56,.64,1); z-index: 2147483645;
         }
-        .m3u8-panel.open {
-            opacity: 1; pointer-events: auto;
-            transform: translateY(0) scale(1);
-        }
-
-        /* 滚动条美化 */
+        .m3u8-panel.open { opacity: 1; pointer-events: auto; transform: translateY(0) scale(1); }
         .m3u8-panel::-webkit-scrollbar { width: 4px; }
         .m3u8-panel::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.2); border-radius: 2px; }
 
-        /* 输入框区域 - 去白底 */
         .input-group {
-            display: flex; align-items: stretch;
-            margin-bottom: 10px; border-radius: 10px; overflow: hidden;
-            border: 1px solid rgba(255,255,255,0.15);
-            background: rgba(255,255,255,0.05);
+            display: flex; align-items: stretch; margin-bottom: 10px; border-radius: 10px; overflow: hidden;
+            border: 1px solid rgba(255,255,255,0.15); background: rgba(255,255,255,0.05);
         }
         .input-icon {
-            width: 38px; display: flex;
-            align-items: center; justify-content: center;
-            color: rgba(255,255,255,0.6); flex-shrink: 0;
-            border-right: 1px solid rgba(255,255,255,0.1);
+            width: 38px; display: flex; align-items: center; justify-content: center;
+            color: rgba(255,255,255,0.6); flex-shrink: 0; border-right: 1px solid rgba(255,255,255,0.1);
             cursor: pointer; transition: all 0.15s;
         }
-        .input-icon-right {
-            border-right: none;
-            border-left: 1px solid rgba(255,255,255,0.1);
-        }
+        .input-icon-right { border-right: none; border-left: 1px solid rgba(255,255,255,0.1); }
         .input-icon:hover { background: rgba(255,255,255,0.1); color: #fff; }
         .input-icon:active { transform: scale(0.92); }
         .input-icon.copied { background: rgba(0,122,255,0.3); color: #fff; }
         .input-icon svg { width: 16px; height: 16px; stroke: currentColor; }
         .m3u8-input {
-            flex: 1; padding: 10px 12px;
-            border: none; background: transparent;
-            color: #fff; font-size: 13px;
-            outline: none; box-sizing: border-box; min-width: 0;
+            flex: 1; padding: 10px 12px; border: none; background: transparent;
+            color: #fff; font-size: 13px; outline: none; box-sizing: border-box; min-width: 0;
         }
         .m3u8-input::placeholder { color: rgba(255,255,255,0.4); }
-        .input-group:focus-within {
-            border-color: rgba(255,255,255,0.35);
-            background: rgba(255,255,255,0.08);
-        }
+        .input-group:focus-within { border-color: rgba(255,255,255,0.35); background: rgba(255,255,255,0.08); }
 
-        /* 线程选择行（含高光下分隔线） */
         .thread-row {
-            display: flex; align-items: center; gap: 6px;
-            margin-bottom: 12px; padding-bottom: 10px;
+            display: flex; align-items: center; gap: 6px; margin-bottom: 12px; padding-bottom: 10px;
             border-bottom: 1px solid rgba(255,255,255,0.15);
         }
         .thread-label { font-size: 12px; opacity: 0.8; margin-right: 4px; }
         .thread-chip {
-            background: rgba(255,255,255,0.1);
-            border: 1px solid rgba(255,255,255,0.25);
-            border-radius: 8px; padding: 4px 10px;
-            font-size: 12px; font-weight: 600; color: #fff;
-            cursor: pointer; transition: all 0.15s;
+            background: rgba(255,255,255,0.1); border: 1px solid rgba(255,255,255,0.25); border-radius: 8px;
+            padding: 4px 10px; font-size: 12px; font-weight: 600; color: #fff; cursor: pointer; transition: all 0.15s;
         }
         .thread-chip:hover { background: rgba(255,255,255,0.2); }
         .thread-chip.active { background: #007aff; border-color: #007aff; color: #fff; }
 
-        /* iOS 玻璃质感按钮 */
         .ios-glass-btn {
-            appearance: none; -webkit-appearance: none;
-            border: 1px solid rgba(255,255,255,0.28);
-            margin: 0; padding: 0; outline: none;
-            font-family: inherit;
-            display: flex; align-items: center; justify-content: center;
-            border-radius: 50%; color: #fff; cursor: pointer;
-            background: rgba(20,20,20,0.4);
-            -webkit-backdrop-filter: blur(20px) saturate(180%);
-            backdrop-filter: blur(20px) saturate(180%);
-            box-shadow: 0 4px 18px rgba(0,0,0,0.25),
-                        inset 0 1px 0 rgba(255,255,255,0.18),
-                        0 0 10px rgba(255,255,255,0.15);
-            transition: transform 0.22s cubic-bezier(.34,1.56,.64,1),
-                        background 0.15s, box-shadow 0.15s;
+            appearance: none; -webkit-appearance: none; border: 1px solid rgba(255,255,255,0.28);
+            margin: 0; padding: 0; outline: none; font-family: inherit;
+            display: flex; align-items: center; justify-content: center; border-radius: 50%;
+            color: #fff; cursor: pointer; background: rgba(20,20,20,0.4);
+            -webkit-backdrop-filter: blur(20px) saturate(180%); backdrop-filter: blur(20px) saturate(180%);
+            box-shadow: 0 4px 18px rgba(0,0,0,0.25), inset 0 1px 0 rgba(255,255,255,0.18), 0 0 10px rgba(255,255,255,0.15);
+            transition: transform 0.22s cubic-bezier(.34,1.56,.64,1), background 0.15s, box-shadow 0.15s;
             transform: scale(1); width: 40px; height: 40px;
         }
         .ios-glass-btn:hover {
             background: rgba(46,46,46,0.5);
-            box-shadow: 0 6px 24px rgba(0,0,0,0.35),
-                        inset 0 1px 0 rgba(255,255,255,0.22),
-                        0 0 18px rgba(255,255,255,0.3);
+            box-shadow: 0 6px 24px rgba(0,0,0,0.35), inset 0 1px 0 rgba(255,255,255,0.22), 0 0 18px rgba(255,255,255,0.3);
         }
         .ios-glass-btn:active { transform: scale(0.92); }
         .ios-glass-btn:disabled { opacity: 0.4; pointer-events: none; }
         .ios-glass-btn svg { width: 18px; height: 18px; }
-
-        .ios-glass-btn.download-btn {
-            background: rgba(0,122,255,0.3);
-            border-color: rgba(0,122,255,0.5);
-        }
+        .ios-glass-btn.download-btn { background: rgba(0,122,255,0.3); border-color: rgba(0,122,255,0.5); }
         .ios-glass-btn.download-btn:hover { background: rgba(0,122,255,0.45); }
-        .ios-glass-btn.download-btn.retry {
-            background: rgba(255,159,10,0.3);
-            border-color: rgba(255,159,10,0.5);
-        }
+        .ios-glass-btn.download-btn.retry { background: rgba(255,159,10,0.3); border-color: rgba(255,159,10,0.5); }
         .ios-glass-btn.download-btn.retry:hover { background: rgba(255,159,10,0.45); }
         .ios-glass-btn.pause-btn { background: rgba(255,255,255,0.1); }
-        .cleanup-btn {
-            background: rgba(255,59,48,0.3);
-            border-color: rgba(255,59,48,0.5);
-            display: none; margin-left: auto;
-        }
+        .cleanup-btn { background: rgba(255,59,48,0.3); border-color: rgba(255,59,48,0.5); display: none; margin-left: auto; }
         .cleanup-btn:hover { background: rgba(255,59,48,0.45); }
 
-        /* 进度条 */
-        .progress-wrap {
-            height: 8px; background: rgba(255,255,255,0.12);
-            border-radius: 4px; overflow: hidden;
-            margin: 10px 0 12px 0;
-        }
-        .progress-bar {
-            height: 100%; background: #007aff;
-            width: 0%; transition: width 0.3s;
-        }
+        .progress-wrap { height: 8px; background: rgba(255,255,255,0.12); border-radius: 4px; overflow: hidden; margin: 10px 0 12px 0; }
+        .progress-bar { height: 100%; background: #007aff; width: 0%; transition: width 0.3s; }
         .progress-bar.error-bar { background: #ff9f0a; }
 
-        .info-row {
-            display: flex; justify-content: space-between;
-            font-size: 11px; opacity: 0.8; margin-bottom: 4px;
-        }
-
-        /* 状态栏（高光上分隔线） */
-        .status-text {
-            font-size: 12px; opacity: 0.8;
-            word-break: break-all; line-height: 1.4;
-            padding-top: 8px;
-            border-top: 1px solid rgba(255,255,255,0.15);
-        }
+        .info-row { display: flex; justify-content: space-between; font-size: 11px; opacity: 0.8; margin-bottom: 4px; }
+        .status-text { font-size: 12px; opacity: 0.8; word-break: break-all; line-height: 1.4; padding-top: 8px; border-top: 1px solid rgba(255,255,255,0.15); }
         .status-text.error-text { color: #ff9f0a; }
 
-        .mode-info {
-            position: absolute; bottom: 16px; right: 16px;
-            font-size: 11px; opacity: 0.7; color: #fff;
-            pointer-events: none;
-        }
+        .mode-info { position: absolute; bottom: 16px; right: 16px; font-size: 11px; opacity: 0.7; color: #fff; pointer-events: none; }
     `;
     const style = document.createElement('style');
     style.textContent = CSS;
@@ -248,11 +159,7 @@
             if (v.src && v.src.includes('.m3u8')) return v.src;
             if (v.currentSrc && v.currentSrc.includes('.m3u8')) return v.currentSrc;
             for (const key of ['_hls', '__hls', 'hls', 'hlsInstance', 'player', '_player']) {
-                try {
-                    const inst = v[key];
-                    if (inst && inst.url && inst.url.includes('.m3u8')) return inst.url;
-                    if (inst && inst.media && inst.media.url && inst.media.url.includes('.m3u8')) return inst.media.url;
-                } catch (_) {}
+                try { const inst = v[key]; if (inst && inst.url && inst.url.includes('.m3u8')) return inst.url; if (inst && inst.media && inst.media.url && inst.media.url.includes('.m3u8')) return inst.media.url; } catch (_) {}
             }
         }
         const sources = document.querySelectorAll('video source[src]');
@@ -261,43 +168,22 @@
             const val = el.dataset.m3u8 || el.dataset.hls || el.dataset.src || el.dataset.video;
             if (val && val.includes('.m3u8')) return val;
         }
-        try {
-            if (window.hls && window.hls.url && window.hls.url.includes('.m3u8')) return window.hls.url;
-            if (window.Hls && window.Hls.url && window.Hls.url.includes('.m3u8')) return window.Hls.url;
-            if (window.player && window.player.url && window.player.url.includes('.m3u8')) return window.player.url;
-        } catch (_) {}
-        try {
-            const entries = performance.getEntriesByType('resource');
-            const found = [...entries].reverse().find(e => e.name.includes('.m3u8'));
-            if (found) return found.name;
-        } catch (_) {}
+        try { if (window.hls && window.hls.url && window.hls.url.includes('.m3u8')) return window.hls.url; if (window.Hls && window.Hls.url && window.Hls.url.includes('.m3u8')) return window.Hls.url; if (window.player && window.player.url && window.player.url.includes('.m3u8')) return window.player.url; } catch (_) {}
+        try { const entries = performance.getEntriesByType('resource'); const found = [...entries].reverse().find(e => e.name.includes('.m3u8')); if (found) return found.name; } catch (_) {}
         const scripts = document.querySelectorAll('script');
-        for (const script of scripts) {
-            const text = script.textContent || script.innerText || '';
-            const match = text.match(/https?:\/\/[^"'\s]+\.m3u8[^"'\s]*/);
-            if (match) return match[0];
-        }
+        for (const script of scripts) { const text = script.textContent || script.innerText || ''; const match = text.match(/https?:\/\/[^"'\s]+\.m3u8[^"'\s]*/); if (match) return match[0]; }
         return '';
     }
 
     async function copyToClipboard(text) {
-        try {
-            if (typeof GM_setClipboard !== 'undefined') { GM_setClipboard(text, 'text'); return true; }
-            await navigator.clipboard.writeText(text);
-            return true;
-        } catch (_) { return false; }
+        try { if (typeof GM_setClipboard !== 'undefined') { GM_setClipboard(text, 'text'); return true; } await navigator.clipboard.writeText(text); return true; } catch (_) { return false; }
     }
 
     async function fetchRealM3u8(url) {
         const text = await new Promise(resolve => {
-            GM_xmlhttpRequest({
-                method: 'GET', url, timeout: REQUEST_TIMEOUT,
-                onload: r => resolve(r.responseText),
-                onerror: () => resolve(null), ontimeout: () => resolve(null)
-            });
+            GM_xmlhttpRequest({ method: 'GET', url, timeout: REQUEST_TIMEOUT, onload: r => resolve(r.responseText), onerror: () => resolve(null), ontimeout: () => resolve(null) });
         });
         if (!text) return null;
-
         if (text.includes('#EXT-X-STREAM-INF')) {
             const lines = text.split('\n');
             let bestBandwidth = 0, bestUrl = '';
@@ -305,33 +191,19 @@
                 const line = lines[i].trim();
                 if (line.startsWith('#EXT-X-STREAM-INF')) {
                     const bw = parseInt((line.match(/BANDWIDTH=(\d+)/) || [])[1]) || 0;
-                    if (i + 1 < lines.length) {
-                        const sub = lines[i + 1].trim();
-                        if (sub && !sub.startsWith('#')) {
-                            if (bw > bestBandwidth) { bestBandwidth = bw; bestUrl = sub; }
-                        }
-                    }
+                    if (i + 1 < lines.length) { const sub = lines[i + 1].trim(); if (sub && !sub.startsWith('#')) { if (bw > bestBandwidth) { bestBandwidth = bw; bestUrl = sub; } } }
                 }
             }
             if (bestUrl) return fetchRealM3u8(new URL(bestUrl, url).href);
             return null;
         }
-
         const lines = text.split('\n');
-        let mapUri = null;
-        const segments = [];
-        let totalDuration = 0;
+        let mapUri = null; const segments = []; let totalDuration = 0;
         for (const line of lines) {
             const t = line.trim();
-            if (t.startsWith('#EXT-X-MAP:URI=')) {
-                const m = t.match(/URI="([^"]+)"/);
-                if (m) mapUri = new URL(m[1], url).href;
-            } else if (t.startsWith('#EXTINF:')) {
-                const dur = parseFloat(t.split(':')[1].replace(',', ''));
-                if (!isNaN(dur)) totalDuration += dur;
-            } else if (t && !t.startsWith('#')) {
-                try { segments.push(new URL(t, url).href); } catch (_) {}
-            }
+            if (t.startsWith('#EXT-X-MAP:URI=')) { const m = t.match(/URI="([^"]+)"/); if (m) mapUri = new URL(m[1], url).href; }
+            else if (t.startsWith('#EXTINF:')) { const dur = parseFloat(t.split(':')[1].replace(',', '')); if (!isNaN(dur)) totalDuration += dur; }
+            else if (t && !t.startsWith('#')) { try { segments.push(new URL(t, url).href); } catch (_) {} }
         }
         return { mapUri, segments, totalDuration, rawText: text };
     }
@@ -345,12 +217,7 @@
                 const xhr = GM_xmlhttpRequest({
                     method: 'GET', url, responseType: 'blob', timeout: REQUEST_TIMEOUT,
                     headers: { 'Referer': referer, 'Origin': new URL(referer).origin },
-                    onload: r => {
-                        if (signal && signal.aborted) return reject(new Error('aborted'));
-                        if (r.status >= 200 && r.status < 300 && r.response && r.response.size > 0) resolve(r.response);
-                        else if (n > 1) setTimeout(() => attempt(n - 1), 500);
-                        else reject(new Error(`HTTP ${r.status}`));
-                    },
+                    onload: r => { if (signal && signal.aborted) return reject(new Error('aborted')); if (r.status >= 200 && r.status < 300 && r.response && r.response.size > 0) resolve(r.response); else if (n > 1) setTimeout(() => attempt(n - 1), 500); else reject(new Error(`HTTP ${r.status}`)); },
                     onerror: () => { if (signal && signal.aborted) return reject(new Error('aborted')); if (n > 1) setTimeout(() => attempt(n - 1), 500); else reject(new Error('network')); },
                     ontimeout: () => { if (signal && signal.aborted) return reject(new Error('aborted')); if (n > 1) setTimeout(() => attempt(n - 1), 500); else reject(new Error('timeout')); }
                 });
@@ -379,8 +246,8 @@
             this.completed = 0; this.total = 0; this.bytes = 0; this.startTime = 0;
             this.mode = 'memory';
             this.writable = null; this.dirHandle = null;
-            this.segmentBlobs = [];      // 内存模式按索引存储 TS 片段
-            this.mapBlob = null;         // 初始化段 Blob
+            this.segmentBlobs = [];
+            this.mapBlob = null;
             this.currentFilename = ''; this.previousFilename = '';
             this.segments = []; this.mapUri = null;
         }
@@ -396,28 +263,19 @@
             const cleanupBtn = panel.querySelector('#cleanup-btn');
             const modeInfo = panel.querySelector('#mode-info');
 
-            // 重置 UI
-            progressBar.style.width = '0%';
-            progressBar.classList.remove('error-bar');
-            progressText.textContent = '0%';
-            speedText.textContent = '0 KB/s';
-            statusText.textContent = '📡 正在获取 M3U8...';
-            statusText.classList.remove('error-text');
-            downloadBtn.disabled = true;
-            downloadBtn.classList.remove('retry');
-            downloadBtn.innerHTML = ICONS.download;
-            pauseBtn.disabled = true;
-            pauseBtn.innerHTML = ICONS.pause;
-            cleanupBtn.style.display = 'none';
-            modeInfo.textContent = '';
-            ball.classList.remove('done', 'error');
+            progressBar.style.width = '0%'; progressBar.classList.remove('error-bar');
+            progressText.textContent = '0%'; speedText.textContent = '0 KB/s';
+            statusText.textContent = '📡 正在获取 M3U8...'; statusText.classList.remove('error-text');
+            downloadBtn.disabled = true; downloadBtn.classList.remove('retry'); downloadBtn.innerHTML = ICONS.download;
+            pauseBtn.disabled = true; pauseBtn.innerHTML = ICONS.pause;
+            cleanupBtn.style.display = 'none'; modeInfo.textContent = '';
+            ball.classList.remove('done','error');
 
             try {
                 const manifest = await fetchRealM3u8(this.url);
                 if (!manifest || !manifest.segments.length) throw new Error('无法解析 M3U8');
                 if (manifest.rawText.includes('#EXT-X-KEY:METHOD=AES-128')) {
-                    statusText.textContent = '🔐 加密视频，已复制链接';
-                    statusText.classList.add('error-text');
+                    statusText.textContent = '🔐 加密视频，已复制链接'; statusText.classList.add('error-text');
                     GM_setClipboard(this.url, 'text');
                     throw new Error('encrypted');
                 }
@@ -440,30 +298,25 @@
                 }
 
                 if (this.mode === 'disk') {
-                    // 磁盘模式：串行可靠下载
-                    await this.diskModeRun();
+                    await this._diskModeRun();
                 } else {
-                    // 内存模式：并发 + 集中重试
-                    await this.memoryModeRun();
+                    await this._memoryModeRun();
                 }
             } catch (err) {
                 if (['encrypted','no-fs','CrossOriginIframe','用户取消'].includes(err.message)) {
-                    ball.classList.add('error');
-                    downloadBtn.disabled = false;
-                    pauseBtn.disabled = true;
+                    ball.classList.add('error'); downloadBtn.disabled = false; pauseBtn.disabled = true;
                     return;
                 }
                 statusText.textContent = '❌ ' + err.message;
                 statusText.classList.add('error-text');
-                downloadBtn.disabled = false;
-                pauseBtn.disabled = true;
+                downloadBtn.disabled = false; pauseBtn.disabled = true;
                 ball.classList.add('error');
             } finally {
                 if (!this.paused) currentDownload = null;
             }
         }
 
-        async function diskModeRun() {
+        async _diskModeRun() {
             const { panel, ball } = this.ui;
             const progressBar = panel.querySelector('.progress-bar');
             const progressText = panel.querySelector('#progress-text');
@@ -473,36 +326,24 @@
             const pauseBtn = panel.querySelector('#pause-btn');
             const cleanupBtn = panel.querySelector('#cleanup-btn');
 
-            try {
-                this.dirHandle = await getDirectoryHandle();
-            } catch (err) {
-                if (err.message === 'CrossOriginIframe') {
-                    statusText.textContent = '⚠️ 跨域iframe，已复制链接';
-                    GM_setClipboard(this.url, 'text');
-                    throw new Error('CrossOriginIframe');
-                } else if (err.message === '用户取消') {
-                    statusText.textContent = '已取消';
-                    downloadBtn.disabled = false;
-                    pauseBtn.disabled = true;
-                    return;
-                } else throw err;
+            try { this.dirHandle = await getDirectoryHandle(); }
+            catch (err) {
+                if (err.message === 'CrossOriginIframe') { statusText.textContent = '⚠️ 跨域iframe，已复制链接'; GM_setClipboard(this.url, 'text'); throw new Error('CrossOriginIframe'); }
+                else if (err.message === '用户取消') { statusText.textContent = '已取消'; downloadBtn.disabled = false; pauseBtn.disabled = true; return; }
+                else throw err;
             }
             this.currentFilename = `video_${Date.now()}.mp4`;
             const fh = await this.dirHandle.getFileHandle(this.currentFilename, { create: true });
             this.writable = await fh.createWritable();
 
-            // 先写入 MAP 段
-            if (this.mapBlob) {
-                await this.writable.write(this.mapBlob);
-            }
+            if (this.mapBlob) await this.writable.write(this.mapBlob);
 
             this.completed = 0;
             this.bytes = this.mapBlob ? this.mapBlob.size : 0;
             this.startTime = Date.now();
             this.abortController = new AbortController();
 
-            pauseBtn.disabled = false;
-            pauseBtn.innerHTML = ICONS.pause;
+            pauseBtn.disabled = false; pauseBtn.innerHTML = ICONS.pause;
             pauseBtn.onclick = () => this.togglePause();
 
             const updateProgress = () => {
@@ -519,16 +360,14 @@
             for (let i = 0; i < this.segments.length; i++) {
                 if (this.paused) {
                     statusText.textContent = '⏸️ 已暂停，点击 ▶ 继续';
-                    pauseBtn.disabled = false;
-                    downloadBtn.disabled = true;
+                    pauseBtn.disabled = false; downloadBtn.disabled = true;
                     return;
                 }
-
                 const segUrl = this.segments[i];
                 let success = false;
                 while (!success && !this.paused) {
                     try {
-                        const blob = await downloadSegment(segUrl, this.url, this.abortController.signal, DISK_RETRIES);
+                        const blob = await downloadSegment(segUrl, this.url, this.abortController.signal, 9999);
                         if (this.paused) return;
                         await this.writable.write(blob);
                         this.bytes += blob.size;
@@ -537,34 +376,26 @@
                         success = true;
                     } catch (err) {
                         if (err.message === 'aborted') return;
-                        // 重试提示
                         statusText.textContent = `🔄 片段 ${i+1} 重试中...`;
                     }
                 }
             }
 
-            // 完成
             await this.writable.close();
             if (this.paused) {
                 statusText.textContent = '⏸️ 已暂停，点击 ▶ 继续';
-                pauseBtn.disabled = false;
-                downloadBtn.disabled = true;
+                pauseBtn.disabled = false; downloadBtn.disabled = true;
                 return;
             }
 
-            // 成功
             if (this.previousFilename && this.dirHandle) {
                 try { await this.dirHandle.removeEntry(this.previousFilename); } catch(_) {}
             }
             const fileSizeMB = (this.bytes / 1024 / 1024).toFixed(2);
-            progressBar.style.width = '100%';
-            progressBar.classList.remove('error-bar');
-            progressText.textContent = '100%';
-            ball.classList.add('done');
-            downloadBtn.disabled = false;
-            pauseBtn.disabled = true;
-            downloadBtn.classList.remove('retry');
-            downloadBtn.innerHTML = ICONS.download;
+            progressBar.style.width = '100%'; progressBar.classList.remove('error-bar');
+            progressText.textContent = '100%'; ball.classList.add('done');
+            downloadBtn.disabled = false; pauseBtn.disabled = true;
+            downloadBtn.classList.remove('retry'); downloadBtn.innerHTML = ICONS.download;
             cleanupBtn.style.display = 'flex';
             statusText.textContent = `✅ 完成：${this.currentFilename} (${fileSizeMB}MB)`;
             if (typeof GM_notification !== 'undefined') {
@@ -572,7 +403,7 @@
             }
         }
 
-        async function memoryModeRun() {
+        async _memoryModeRun() {
             const { panel, ball } = this.ui;
             const progressBar = panel.querySelector('.progress-bar');
             const progressText = panel.querySelector('#progress-text');
@@ -582,19 +413,17 @@
             const pauseBtn = panel.querySelector('#pause-btn');
             const cleanupBtn = panel.querySelector('#cleanup-btn');
 
-            // 初始化顺序数组
             this.segmentBlobs = new Array(this.total).fill(null);
             this.completed = 0;
             this.bytes = this.mapBlob ? this.mapBlob.size : 0;
             this.startTime = Date.now();
-            this.failed = [];
+            const failed = [];
             this.abortController = new AbortController();
 
             const queue = this.segments.map((url, idx) => ({ url, idx }));
             const concurrency = this.concurrency;
 
-            pauseBtn.disabled = false;
-            pauseBtn.innerHTML = ICONS.pause;
+            pauseBtn.disabled = false; pauseBtn.innerHTML = ICONS.pause;
             pauseBtn.onclick = () => this.togglePause();
 
             const updateProgress = () => {
@@ -610,7 +439,7 @@
 
             const downloadOne = async (segUrl, idx) => {
                 try {
-                    const blob = await downloadSegment(segUrl, this.url, this.abortController.signal);
+                    const blob = await downloadSegment(segUrl, this.url, this.abortController.signal, MAX_RETRIES);
                     if (this.paused) return;
                     this.segmentBlobs[idx] = blob;
                     this.bytes += blob.size;
@@ -618,13 +447,12 @@
                     updateProgress();
                 } catch (err) {
                     if (err.message === 'aborted') return;
-                    this.failed.push({ url: segUrl, idx });
+                    failed.push({ url: segUrl, idx });
                     this.completed++;
                     updateProgress();
                 }
             };
 
-            // 第一轮下载
             const workers = [];
             for (let i = 0; i < concurrency; i++) {
                 workers.push((async () => {
@@ -638,65 +466,55 @@
             }
             await Promise.all(workers);
 
-            // 集中重试
-            for (let round = 0; round < FINAL_RETRY_ROUNDS && this.failed.length > 0 && !this.paused; round++) {
-                statusText.textContent = `🔄 重试 ${round+1}/${FINAL_RETRY_ROUNDS} (${this.failed.length}个)`;
-                const retryList = [...this.failed];
-                this.failed = [];
-                const retryWorkers = [];
+            for (let round = 0; round < FINAL_RETRY_ROUNDS && failed.length > 0 && !this.paused; round++) {
+                statusText.textContent = `🔄 重试 ${round+1}/${FINAL_RETRY_ROUNDS} (${failed.length}个)`;
+                const retryList = [...failed];
+                failed.length = 0;
+                const rworkers = [];
                 for (let i = 0; i < concurrency; i++) {
-                    retryWorkers.push((async () => {
+                    rworkers.push((async () => {
                         while (retryList.length > 0) {
                             if (this.paused) return;
                             const item = retryList.shift();
                             try {
-                                const blob = await downloadSegment(item.url, this.url, this.abortController.signal);
+                                const blob = await downloadSegment(item.url, this.url, this.abortController.signal, MAX_RETRIES);
                                 if (this.paused) return;
                                 this.segmentBlobs[item.idx] = blob;
                                 this.bytes += blob.size;
                             } catch (err) {
                                 if (err.message === 'aborted') return;
-                                this.failed.push(item);
+                                failed.push(item);
                             }
                         }
                     })());
                 }
-                await Promise.all(retryWorkers);
+                await Promise.all(rworkers);
             }
 
             if (this.paused) {
                 statusText.textContent = '⏸️ 已暂停，点击 ▶ 继续';
-                pauseBtn.disabled = false;
-                downloadBtn.disabled = true;
+                pauseBtn.disabled = false; downloadBtn.disabled = true;
                 return;
             }
 
             cleanupBtn.style.display = 'flex';
 
-            if (this.failed.length === 0) {
-                const missingIndex = this.segmentBlobs.findIndex(b => b === null);
-                if (missingIndex !== -1) throw new Error(`片段 ${missingIndex} 丢失`);
+            if (failed.length === 0) {
+                const missing = this.segmentBlobs.findIndex(b => b === null);
+                if (missing !== -1) throw new Error(`片段 ${missing} 丢失`);
 
                 const fileSizeMB = (this.bytes / 1024 / 1024).toFixed(2);
-                progressBar.style.width = '100%';
-                progressBar.classList.remove('error-bar');
-                progressText.textContent = '100%';
-                ball.classList.add('done');
-                downloadBtn.disabled = false;
-                pauseBtn.disabled = true;
-                downloadBtn.classList.remove('retry');
-                downloadBtn.innerHTML = ICONS.download;
+                progressBar.style.width = '100%'; progressBar.classList.remove('error-bar');
+                progressText.textContent = '100%'; ball.classList.add('done');
+                downloadBtn.disabled = false; pauseBtn.disabled = true;
+                downloadBtn.classList.remove('retry'); downloadBtn.innerHTML = ICONS.download;
 
-                // 按顺序合并：先 MAP，后 TS
                 const blobs = this.mapBlob ? [this.mapBlob, ...this.segmentBlobs] : this.segmentBlobs;
                 const finalBlob = new Blob(blobs, { type: 'video/mp4' });
                 const blobUrl = URL.createObjectURL(finalBlob);
                 const a = document.createElement('a');
-                a.href = blobUrl;
-                a.download = `video_${Date.now()}.mp4`;
-                document.body.appendChild(a);
-                a.click();
-                a.remove();
+                a.href = blobUrl; a.download = `video_${Date.now()}.mp4`;
+                document.body.appendChild(a); a.click(); a.remove();
                 URL.revokeObjectURL(blobUrl);
                 statusText.textContent = `✅ 完成 (${fileSizeMB}MB)`;
                 if (typeof GM_notification !== 'undefined') {
@@ -704,12 +522,10 @@
                 }
             } else {
                 progressBar.classList.add('error-bar');
-                statusText.textContent = `⚠️ ${this.failed.length}个片段失败，请重试`;
+                statusText.textContent = `⚠️ ${failed.length}个片段失败，请重试`;
                 statusText.classList.add('error-text');
-                downloadBtn.disabled = false;
-                pauseBtn.disabled = true;
-                downloadBtn.classList.add('retry');
-                downloadBtn.innerHTML = ICONS.retry;
+                downloadBtn.disabled = false; pauseBtn.disabled = true;
+                downloadBtn.classList.add('retry'); downloadBtn.innerHTML = ICONS.retry;
                 ball.classList.add('error');
             }
         }
@@ -731,16 +547,12 @@
             let releasedSize = this.bytes || 0;
             const releasedMB = (releasedSize / 1024 / 1024).toFixed(2);
             this.cleanup();
-            const panel = this.ui.panel;
-            panel.querySelector('#cleanup-btn').style.display = 'none';
-            panel.querySelector('#status-text').textContent = `🗑️ 已释放 ${releasedMB} MB 内存`;
+            this.ui.panel.querySelector('#cleanup-btn').style.display = 'none';
+            this.ui.panel.querySelector('#status-text').textContent = `🗑️ 已释放 ${releasedMB} MB 内存`;
         }
 
         cleanup() {
-            this.segmentBlobs = null;
-            this.mapBlob = null;
-            this.failed = null;
-            this.segments = null;
+            this.segmentBlobs = null; this.mapBlob = null; this.segments = null;
             if (this.abortController) { try { this.abortController.abort(); } catch(_) {} this.abortController = null; }
             if (this.writable) { try { this.writable.close(); } catch(_) {} this.writable = null; }
         }
@@ -780,7 +592,6 @@
 
         const linkIcon = panel.querySelector('#link-icon'); const urlInput = panel.querySelector('#url-input');
         linkIcon.addEventListener('click', async (e) => { e.stopPropagation(); const link = urlInput.value.trim(); if (!link) return; const ok = await copyToClipboard(link); if (ok) { linkIcon.classList.add('copied'); linkIcon.innerHTML = ICONS.check; setTimeout(() => { linkIcon.classList.remove('copied'); linkIcon.innerHTML = ICONS.link; }, 1500); panel.querySelector('#status-text').textContent = '✅ 已复制'; setTimeout(() => { panel.querySelector('#status-text').textContent = '就绪'; }, 1500); } });
-
         const refreshIcon = panel.querySelector('#refresh-icon');
         refreshIcon.addEventListener('click', (e) => { e.stopPropagation(); const newUrl = sniffM3u8(); if (newUrl) { urlInput.value = newUrl; panel.querySelector('#status-text').textContent = '✅ 已更新链接'; ball.classList.add('has-url'); } else { panel.querySelector('#status-text').textContent = '⚠️ 未检测到 M3U8 链接'; } setTimeout(() => { panel.querySelector('#status-text').textContent = '就绪'; }, 1500); });
 
