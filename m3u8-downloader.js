@@ -2,7 +2,7 @@
 // @name         M3U8媒体下载器
 // @namespace    https://github.com/520luo/js/m3u8-downloader
 // @version      26.06.30.2
-// @description  智能嗅探,自定义多线程下载,智能模式,边下边存,精美UI,完整修复版
+// @description  智能嗅探,自定义多线程下载,智能模式,边下边存,精美UI
 // @icon         https://raw.githubusercontent.com/520LUO/icons/refs/heads/main/M3U8.png
 // @author       520LUO
 // @match        *://*/*
@@ -25,7 +25,7 @@
     const FINAL_RETRY_ROUNDS = 2;           // 全部下载完后对失败片段集中重试的轮数（内存模式）
     const REQUEST_TIMEOUT = 10000;          // 单个请求超时时间（毫秒）
     const SIZE_THRESHOLD = 800 * 1024 * 1024; // 800MB，超过此大小使用磁盘边下边存
-    const ESTIMATED_BITRATE = 1.5 * 1024 * 1024; // 1.5Mbps 估算码率
+    const ESTIMATED_BITRATE = 1.55 * 1024 * 1024; // 1.55Mbps 估算码率
     const BALL_SIZE = 36;                   // 悬浮球尺寸
 
     let savedDirHandle = null;              // 磁盘模式下缓存的目录句柄
