@@ -1,8 +1,8 @@
 // ==UserScript==
-// @name         M3U8媒体下载器
+// @name         M3U8媒体下载器 (支持AES-128解密)
 // @namespace    https://github.com/520luo/js/m3u8-downloader
-// @version      26.06.30.2
-// @description  智能嗅探,自定义多线程下载,智能模式,边下边存,精美UI
+// @version      26.07.01
+// @description  智能嗅探,多线程下载,智能模式,边下边存,支持AES-128解密,精美UI
 // @icon         https://raw.githubusercontent.com/520LUO/icons/refs/heads/main/M3U8.png
 // @author       520LUO
 // @match        *://*/*
@@ -25,7 +25,7 @@
     const FINAL_RETRY_ROUNDS = 2;           // 全部下载完后对失败片段集中重试的轮数（内存模式）
     const REQUEST_TIMEOUT = 10000;          // 单个请求超时时间（毫秒）
     const SIZE_THRESHOLD = 800 * 1024 * 1024; // 800MB，超过此大小使用磁盘边下边存
-    const ESTIMATED_BITRATE = 1.55 * 1024 * 1024; // 1.55Mbps 估算码率
+    const ESTIMATED_BITRATE = 1.5 * 1024 * 1024; // 1.5Mbps 估算码率
     const BALL_SIZE = 36;                   // 悬浮球尺寸
 
     let savedDirHandle = null;              // 磁盘模式下缓存的目录句柄
@@ -70,7 +70,7 @@
         .m3u8-panel {
             position: fixed;
             width: clamp(340px, 35vw, 560px);   /* 自适应宽度 */
-            max-height: 70vh;                    /* 最大高度为视口高度的70% */
+            max-height: 75vh;                    /* 最大高度为视口高度的70% */
             overflow-y: auto;                    /* 内容超出时滚动 */
             background: rgba(20,20,30,0.75);
             backdrop-filter: blur(24px) saturate(180%);
@@ -292,14 +292,32 @@
         } catch (_) { return false; }
     }
 
-    // 获取真实的 m3u8 内容（处理变体播放列表）
+    // 通用 GM_xmlhttpRequest 请求封装（用于密钥等二进制资源）
+    function gmRequest(url, responseType = 'text', timeout = REQUEST_TIMEOUT) {
+        return new Promise((resolve, reject) => {
+            GM_xmlhttpRequest({
+                method: 'GET', url, responseType, timeout,
+                onload: r => { if (r.status >= 200 && r.status < 300) resolve(r.response); else reject(new Error(`HTTP ${r.status}`)); },
+                onerror: () => reject(new Error('network')),
+                ontimeout: () => reject(new Error('timeout'))
+            });
+        });
+    }
+
+    // AES-128-CBC 解密（Web Crypto API）
+    async function aesDecrypt(ciphertext, keyBytes, ivBytes) {
+        const key = await crypto.subtle.importKey('raw', keyBytes, { name: 'AES-CBC' }, false, ['decrypt']);
+        const out = await crypto.subtle.decrypt({ name: 'AES-CBC', iv: ivBytes }, key, ciphertext);
+        return new Uint8Array(out);
+    }
+
+    // 获取真实的 m3u8 内容（处理变体播放列表，解析加密信息）
     async function fetchRealM3u8(url) {
         const text = await new Promise(resolve => {
             GM_xmlhttpRequest({
                 method: 'GET', url, timeout: REQUEST_TIMEOUT,
                 onload: r => resolve(r.responseText),
-                onerror: () => resolve(null),
-                ontimeout: () => resolve(null)
+                onerror: () => resolve(null), ontimeout: () => resolve(null)
             });
         });
         if (!text) return null;
@@ -324,21 +342,38 @@
             return null;
         }
 
-        // 普通 m3u8
+        // 普通 m3u8，解析片段和加密信息
         const lines = text.split('\n');
         let mapUri = null;
         const segments = [];
         let totalDuration = 0;
+        let currentKey = null; // { method, uri, iv }
+
         for (const line of lines) {
             const t = line.trim();
             if (t.startsWith('#EXT-X-MAP:URI=')) {
                 const m = t.match(/URI="([^"]+)"/);
                 if (m) mapUri = new URL(m[1], url).href;
+            } else if (t.startsWith('#EXT-X-KEY:')) {
+                const methodMatch = t.match(/METHOD=([^,]+)/);
+                const uriMatch = t.match(/URI="([^"]+)"/);
+                const ivMatch = t.match(/IV=0x([0-9a-fA-F]+)/);
+                const method = methodMatch ? methodMatch[1] : '';
+                if (method === 'AES-128') {
+                    const keyUri = uriMatch ? new URL(uriMatch[1], url).href : null;
+                    const iv = ivMatch ? ivMatch[1] : null;
+                    currentKey = { method, uri: keyUri, iv };
+                } else if (method === 'NONE') {
+                    currentKey = null;
+                }
             } else if (t.startsWith('#EXTINF:')) {
                 const dur = parseFloat(t.split(':')[1].replace(',', ''));
                 if (!isNaN(dur)) totalDuration += dur;
             } else if (t && !t.startsWith('#')) {
-                try { segments.push(new URL(t, url).href); } catch (_) {}
+                try {
+                    const segUrl = new URL(t, url).href;
+                    segments.push({ url: segUrl, key: currentKey });
+                } catch (_) {}
             }
         }
         return { mapUri, segments, totalDuration, rawText: text };
@@ -349,13 +384,14 @@
         return duration * ESTIMATED_BITRATE / 8 * 1.1;
     }
 
-    // 下载单个 TS 片段（支持重试和 AbortController）
-    function downloadSegment(url, referer, signal, retries = MAX_RETRIES) {
-        return new Promise((resolve, reject) => {
+    // 下载并解密单个片段
+    async function downloadAndDecrypt(segUrl, referer, signal, keyInfo, keyCache, segmentIndex, retries = MAX_RETRIES) {
+        // 下载密文
+        const blob = await new Promise((resolve, reject) => {
             const attempt = (n) => {
                 if (signal && signal.aborted) return reject(new Error('aborted'));
                 const xhr = GM_xmlhttpRequest({
-                    method: 'GET', url, responseType: 'blob', timeout: REQUEST_TIMEOUT,
+                    method: 'GET', url: segUrl, responseType: 'blob', timeout: REQUEST_TIMEOUT,
                     headers: { 'Referer': referer, 'Origin': new URL(referer).origin },
                     onload: r => {
                         if (signal && signal.aborted) return reject(new Error('aborted'));
@@ -366,21 +402,41 @@
                             else reject(new Error(`HTTP ${r.status}`));
                         }
                     },
-                    onerror: () => {
-                        if (signal && signal.aborted) return reject(new Error('aborted'));
-                        if (n > 1) setTimeout(() => attempt(n - 1), 500);
-                        else reject(new Error('network'));
-                    },
-                    ontimeout: () => {
-                        if (signal && signal.aborted) return reject(new Error('aborted'));
-                        if (n > 1) setTimeout(() => attempt(n - 1), 500);
-                        else reject(new Error('timeout'));
-                    }
+                    onerror: () => { if (signal && signal.aborted) return reject(new Error('aborted')); if (n > 1) setTimeout(() => attempt(n - 1), 500); else reject(new Error('network')); },
+                    ontimeout: () => { if (signal && signal.aborted) return reject(new Error('aborted')); if (n > 1) setTimeout(() => attempt(n - 1), 500); else reject(new Error('timeout')); }
                 });
                 signal?.addEventListener('abort', () => { try { xhr.abort?.(); } catch(_){} });
             };
             attempt(retries);
         });
+
+        // 无加密直接返回
+        if (!keyInfo) return blob;
+
+        // 获取密钥字节
+        let keyBytes = keyCache.get(keyInfo.uri);
+        if (!keyBytes) {
+            keyBytes = new Uint8Array(await gmRequest(keyInfo.uri, 'arraybuffer'));
+            keyCache.set(keyInfo.uri, keyBytes);
+        }
+
+        // 计算 IV
+        let ivBytes;
+        if (keyInfo.iv) {
+            // 显式 IV
+            ivBytes = new Uint8Array(keyInfo.iv.match(/.{2}/g).map(byte => parseInt(byte, 16)));
+        } else {
+            // 隐式 IV：使用片段索引（大端序）
+            const ivBuffer = new ArrayBuffer(16);
+            const ivView = new DataView(ivBuffer);
+            ivView.setBigUint64(8, BigInt(segmentIndex), false);
+            ivBytes = new Uint8Array(ivBuffer);
+        }
+
+        // 解密
+        const cipherBuf = await blob.arrayBuffer();
+        const plainBuf = await aesDecrypt(cipherBuf, keyBytes, ivBytes);
+        return new Blob([plainBuf], { type: 'video/mp2t' });
     }
 
     // 获取目录句柄（磁盘模式），支持缓存和权限续期
@@ -419,12 +475,13 @@
             this.mode = 'memory';       // 'memory' 或 'disk'
             this.writable = null;
             this.dirHandle = null;
-            this.segmentBlobs = [];      // 内存模式按索引存储 TS 片段
+            this.segmentBlobs = [];      // 内存模式按索引存储解密后的 TS 片段
             this.mapBlob = null;         // 初始化段 Blob
             this.currentFilename = '';
             this.previousFilename = '';
-            this.segments = [];
+            this.segments = [];          // { url, key }
             this.mapUri = null;
+            this.keyCache = new Map();   // 密钥缓存
         }
 
         // 启动下载
@@ -460,16 +517,17 @@
                 const manifest = await fetchRealM3u8(this.url);
                 if (!manifest || !manifest.segments.length) throw new Error('无法解析 M3U8');
 
-                // 加密检测
-                if (manifest.rawText.includes('#EXT-X-KEY:METHOD=AES-128')) {
-                    statusText.textContent = '🔐 加密视频，已复制链接，请用 N_m3u8DL 下载';
+                // 检查是否有不支持的加密方式
+                const unsupported = manifest.segments.some(seg => seg.key && seg.key.method !== 'AES-128');
+                if (unsupported) {
+                    statusText.textContent = '🔐 检测到不支持的加密方式，已复制链接，请用 N_m3u8DL 下载';
                     statusText.classList.add('error-text');
                     GM_setClipboard(this.url, 'text');
-                    throw new Error('encrypted');
+                    throw new Error('unsupported-encryption');
                 }
 
                 this.mapUri = manifest.mapUri;
-                this.segments = manifest.segments;
+                this.segments = manifest.segments; // [{ url, key }]
                 this.total = this.segments.length;
                 this.totalDuration = manifest.totalDuration;
                 this.estimatedSize = estimateFileSize(this.totalDuration);
@@ -484,11 +542,11 @@
                 const sizeEst = this.totalDuration > 0 ? `预估 ${(this.estimatedSize/1024/1024).toFixed(0)}MB` : '无法预估时长';
                 modeInfo.textContent = `💡 ${modeLabel} · ${sizeEst}`;
 
-                // 下载初始化段
+                // 下载初始化段 (MAP) - 也可能被加密，暂时使用无加密方式下载（MAP 段通常无加密）
                 if (this.mapUri) {
                     statusText.textContent = `📥 初始化段...`;
-                    const blob = await downloadSegment(this.mapUri, this.url, null);
-                    this.mapBlob = blob;
+                    const mapBlob = await downloadAndDecrypt(this.mapUri, this.url, null, null, this.keyCache, 0, MAX_RETRIES);
+                    this.mapBlob = mapBlob;
                 }
 
                 if (this.mode === 'disk') {
@@ -497,7 +555,7 @@
                     await this._memoryModeRun();
                 }
             } catch (err) {
-                if (['encrypted','no-fs','CrossOriginIframe','用户取消'].includes(err.message)) {
+                if (['encrypted','no-fs','CrossOriginIframe','用户取消','unsupported-encryption'].includes(err.message)) {
                     ball.classList.add('error');
                     downloadBtn.disabled = false;
                     pauseBtn.disabled = true;
@@ -512,10 +570,12 @@
                 if (!this.paused) {
                     currentDownload = null;
                 }
+                // 清理密钥缓存
+                this.keyCache.clear();
             }
         }
 
-        // 磁盘模式（串行可靠下载）
+        // 磁盘模式（串行可靠下载 + 解密）
         async _diskModeRun() {
             const { panel, ball } = this.ui;
             const progressBar = panel.querySelector('.progress-bar');
@@ -576,15 +636,17 @@
                     downloadBtn.disabled = true;
                     return;
                 }
-                const segUrl = this.segments[i];
+                const seg = this.segments[i];
                 let success = false;
                 while (!success && !this.paused) {
                     try {
-                        // 磁盘模式使用无限重试（直到成功）
-                        const blob = await downloadSegment(segUrl, this.url, this.abortController.signal, 9999);
+                        const decryptedBlob = await downloadAndDecrypt(
+                            seg.url, this.url, this.abortController.signal,
+                            seg.key, this.keyCache, i, 9999 // 磁盘模式无限重试
+                        );
                         if (this.paused) return;
-                        await this.writable.write(blob);
-                        this.bytes += blob.size;
+                        await this.writable.write(decryptedBlob);
+                        this.bytes += decryptedBlob.size;
                         this.completed++;
                         updateProgress();
                         success = true;
@@ -622,7 +684,7 @@
             }
         }
 
-        // 内存模式（并发 + 集中重试，保证顺序）
+        // 内存模式（并发 + 集中重试，保证顺序 + 解密）
         async _memoryModeRun() {
             const { panel, ball } = this.ui;
             const progressBar = panel.querySelector('.progress-bar');
@@ -640,7 +702,7 @@
             const failed = [];
             this.abortController = new AbortController();
 
-            const queue = this.segments.map((url, idx) => ({ url, idx }));
+            const queue = this.segments.map((seg, idx) => ({ ...seg, idx }));
             const concurrency = this.concurrency;
 
             pauseBtn.disabled = false;
@@ -658,9 +720,9 @@
 
             statusText.textContent = `📥 下载中 (${this.total} 片段，并发)`;
 
-            const downloadOne = async (segUrl, idx) => {
+            const downloadOne = async (segUrl, keyInfo, idx) => {
                 try {
-                    const blob = await downloadSegment(segUrl, this.url, this.abortController.signal, MAX_RETRIES);
+                    const blob = await downloadAndDecrypt(segUrl, this.url, this.abortController.signal, keyInfo, this.keyCache, idx, MAX_RETRIES);
                     if (this.paused) return;
                     this.segmentBlobs[idx] = blob;
                     this.bytes += blob.size;
@@ -668,7 +730,7 @@
                     updateProgress();
                 } catch (err) {
                     if (err.message === 'aborted') return;
-                    failed.push({ url: segUrl, idx });
+                    failed.push({ url: segUrl, key: keyInfo, idx });
                     this.completed++;
                     updateProgress();
                 }
@@ -681,7 +743,7 @@
                         if (this.paused) return;
                         const seg = queue.shift();
                         if (!seg) continue;
-                        await downloadOne(seg.url, seg.idx);
+                        await downloadOne(seg.url, seg.key, seg.idx);
                     }
                 })());
             }
@@ -698,7 +760,7 @@
                             if (this.paused) return;
                             const item = retryList.shift();
                             try {
-                                const blob = await downloadSegment(item.url, this.url, this.abortController.signal, MAX_RETRIES);
+                                const blob = await downloadAndDecrypt(item.url, this.url, this.abortController.signal, item.key, this.keyCache, item.idx, MAX_RETRIES);
                                 if (this.paused) return;
                                 this.segmentBlobs[item.idx] = blob;
                                 this.bytes += blob.size;
@@ -795,6 +857,7 @@
             this.segmentBlobs = null;
             this.mapBlob = null;
             this.segments = null;
+            this.keyCache.clear();
             if (this.abortController) {
                 try { this.abortController.abort(); } catch(_) {}
                 this.abortController = null;
