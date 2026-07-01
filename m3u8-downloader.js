@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         M3U8媒体下载器 (支持AES-128解密)
 // @namespace    https://github.com/520luo/js/m3u8-downloader
-// @version      26.07.01
-// @description  智能嗅探,多线程下载,智能模式,边下边存,支持AES-128解密,精美UI
+// @version      26.07.02
+// @description  智能嗅探链接,多线程下载,智能模式,大文件边下边存,小文件内存高速下载,支持解密AES-128,精美的UI
 // @icon         https://raw.githubusercontent.com/520LUO/icons/refs/heads/main/M3U8.png
 // @author       520LUO
 // @match        *://*/*
@@ -21,207 +21,134 @@
 
     // ========== 常量配置 ==========
     const CONCURRENCY_OPTIONS = [8, 16, 32, 64];
-    const MAX_RETRIES = 3;                  // 每个片段失败后自动重试次数（内存模式）
-    const FINAL_RETRY_ROUNDS = 2;           // 全部下载完后对失败片段集中重试的轮数（内存模式）
-    const REQUEST_TIMEOUT = 10000;          // 单个请求超时时间（毫秒）
-    const SIZE_THRESHOLD = 800 * 1024 * 1024; // 800MB，超过此大小使用磁盘边下边存
-    const ESTIMATED_BITRATE = 1.5 * 1024 * 1024; // 1.5Mbps 估算码率
-    const BALL_SIZE = 36;                   // 悬浮球尺寸
+    const MAX_RETRIES = 3;
+    const FINAL_RETRY_ROUNDS = 2;
+    const REQUEST_TIMEOUT = 10000;
+    const SIZE_THRESHOLD = 800 * 1024 * 1024;
+    const ESTIMATED_BITRATE = 1.5 * 1024 * 1024;
+    const BALL_SIZE = 36;
 
-    let savedDirHandle = null;              // 磁盘模式下缓存的目录句柄
-    let currentDownload = null;             // 当前下载任务实例
+    let savedDirHandle = null;
+    let currentDownload = null;
 
-    // ==========  UI 样式 ==========
+    // ========== UI 样式 ==========
     const CSS = `
         #m3u8-drag-ball {
             position: fixed; width: ${BALL_SIZE}px; height: ${BALL_SIZE}px; border-radius: 50%;
             background: rgba(20,20,30,0.65);
-            backdrop-filter: blur(16px) saturate(180%);
-            -webkit-backdrop-filter: blur(16px) saturate(180%);
+            backdrop-filter: blur(16px) saturate(180%); -webkit-backdrop-filter: blur(16px) saturate(180%);
             border: 1px solid rgba(255,255,255,0.28);
-            box-shadow: 0 4px 18px rgba(0,0,0,0.25),
-                        inset 0 1px 0 rgba(255,255,255,0.18),
-                        0 0 10px rgba(255,255,255,0.15);
-            cursor: grab; display: none;
-            align-items: center; justify-content: center;
-            color: #fff; font-size: 18px;
-            z-index: 2147483646; user-select: none;
-            touch-action: none;
-            transition: box-shadow 0.2s, transform 0.15s;
-            transform: scale(1);
+            box-shadow: 0 4px 18px rgba(0,0,0,0.25), inset 0 1px 0 rgba(255,255,255,0.18), 0 0 10px rgba(255,255,255,0.15);
+            cursor: grab; display: none; align-items: center; justify-content: center;
+            color: #fff; font-size: 18px; z-index: 2147483646; user-select: none;
+            touch-action: none; transition: box-shadow 0.2s, transform 0.15s; transform: scale(1);
         }
         #m3u8-drag-ball:active { cursor: grabbing; transform: scale(0.92); }
         #m3u8-drag-ball:hover {
-            box-shadow: 0 6px 24px rgba(0,0,0,0.35),
-                        inset 0 1px 0 rgba(255,255,255,0.22),
-                        0 0 18px rgba(255,255,255,0.3);
+            box-shadow: 0 6px 24px rgba(0,0,0,0.35), inset 0 1px 0 rgba(255,255,255,0.22), 0 0 18px rgba(255,255,255,0.3);
         }
         #m3u8-drag-ball::after {
-            content: '';
-            position: absolute; top: 0; right: 0;
-            width: 8px; height: 8px;
-            border-radius: 50%; background: transparent;
-            transition: background 0.2s;
+            content: ''; position: absolute; top: 0; right: 0; width: 8px; height: 8px;
+            border-radius: 50%; background: transparent; transition: background 0.2s;
         }
         #m3u8-drag-ball.has-url::after { background: #30d158; }
         #m3u8-drag-ball.done::after { background: #007aff; }
         #m3u8-drag-ball.error::after { background: #ff3b30; }
 
         .m3u8-panel {
-            position: fixed;
-            width: clamp(340px, 35vw, 560px);   /* 自适应宽度 */
-            max-height: 75vh;                    /* 最大高度为视口高度的70% */
-            overflow-y: auto;                    /* 内容超出时滚动 */
-            background: rgba(20,20,30,0.75);
-            backdrop-filter: blur(24px) saturate(180%);
-            -webkit-backdrop-filter: blur(24px) saturate(180%);
-            border: 1px solid rgba(255,255,255,0.22);
-            border-radius: 18px; padding: 16px;
-            box-shadow: 0 14px 32px rgba(0,0,0,0.4),
-                        inset 0 1px 0 rgba(255,255,255,0.15);
-            color: #fff;
-            font-family: system-ui, -apple-system, sans-serif;
-            opacity: 0; pointer-events: none;
-            transform: translateY(6px) scale(0.96);
-            transition: opacity 0.2s ease, transform 0.25s cubic-bezier(.34,1.56,.64,1);
-            z-index: 2147483645;
+            position: fixed; width: clamp(340px, 35vw, 560px); max-height: 70vh; overflow-y: auto;
+            background: rgba(20,20,30,0.75); backdrop-filter: blur(24px) saturate(180%); -webkit-backdrop-filter: blur(24px) saturate(180%);
+            border: 1px solid rgba(255,255,255,0.22); border-radius: 18px; padding: 16px;
+            box-shadow: 0 14px 32px rgba(0,0,0,0.4), inset 0 1px 0 rgba(255,255,255,0.15);
+            color: #fff; font-family: system-ui, -apple-system, sans-serif;
+            opacity: 0; pointer-events: none; transform: translateY(6px) scale(0.96);
+            transition: opacity 0.2s ease, transform 0.25s cubic-bezier(.34,1.56,.64,1); z-index: 2147483645;
         }
-        .m3u8-panel.open {
-            opacity: 1; pointer-events: auto;
-            transform: translateY(0) scale(1);
-        }
-
-        /* 滚动条美化 */
+        .m3u8-panel.open { opacity: 1; pointer-events: auto; transform: translateY(0) scale(1); }
         .m3u8-panel::-webkit-scrollbar { width: 4px; }
         .m3u8-panel::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.2); border-radius: 2px; }
 
-        /* 输入框区域 - 去白底 */
         .input-group {
-            display: flex; align-items: stretch;
-            margin-bottom: 10px; border-radius: 10px; overflow: hidden;
-            border: 1px solid rgba(255,255,255,0.15);
-            background: rgba(255,255,255,0.05);
+            display: flex; align-items: stretch; margin-bottom: 10px; border-radius: 10px; overflow: hidden;
+            border: 1px solid rgba(255,255,255,0.15); background: rgba(255,255,255,0.05);
         }
         .input-icon {
-            width: 38px; display: flex;
-            align-items: center; justify-content: center;
-            color: rgba(255,255,255,0.6); flex-shrink: 0;
-            border-right: 1px solid rgba(255,255,255,0.1);
+            width: 38px; display: flex; align-items: center; justify-content: center;
+            color: rgba(255,255,255,0.6); flex-shrink: 0; border-right: 1px solid rgba(255,255,255,0.1);
             cursor: pointer; transition: all 0.15s;
         }
-        .input-icon-right {
-            border-right: none;
-            border-left: 1px solid rgba(255,255,255,0.1);
-        }
+        .input-icon-right { border-right: none; border-left: 1px solid rgba(255,255,255,0.1); }
         .input-icon:hover { background: rgba(255,255,255,0.1); color: #fff; }
         .input-icon:active { transform: scale(0.92); }
         .input-icon.copied { background: rgba(0,122,255,0.3); color: #fff; }
         .input-icon svg { width: 16px; height: 16px; stroke: currentColor; }
         .m3u8-input {
-            flex: 1; padding: 10px 12px;
-            border: none; background: transparent;
-            color: #fff; font-size: 13px;
-            outline: none; box-sizing: border-box; min-width: 0;
+            flex: 1; padding: 10px 12px; border: none; background: transparent;
+            color: #fff; font-size: 13px; outline: none; box-sizing: border-box; min-width: 0;
         }
         .m3u8-input::placeholder { color: rgba(255,255,255,0.4); }
-        .input-group:focus-within {
-            border-color: rgba(255,255,255,0.35);
-            background: rgba(255,255,255,0.08);
-        }
+        .input-group:focus-within { border-color: rgba(255,255,255,0.35); background: rgba(255,255,255,0.08); }
 
-        /* 线程选择行（含高光下分隔线） */
         .thread-row {
-            display: flex; align-items: center; gap: 6px;
-            margin-bottom: 12px; padding-bottom: 10px;
+            display: flex; align-items: center; gap: 6px; margin-bottom: 12px; padding-bottom: 10px;
             border-bottom: 1px solid rgba(255,255,255,0.15);
         }
         .thread-label { font-size: 12px; opacity: 0.8; margin-right: 4px; }
         .thread-chip {
-            background: rgba(255,255,255,0.1);
-            border: 1px solid rgba(255,255,255,0.25);
-            border-radius: 8px; padding: 4px 10px;
-            font-size: 12px; font-weight: 600; color: #fff;
-            cursor: pointer; transition: all 0.15s;
+            background: rgba(255,255,255,0.1); border: 1px solid rgba(255,255,255,0.25); border-radius: 8px;
+            padding: 4px 10px; font-size: 12px; font-weight: 600; color: #fff; cursor: pointer; transition: all 0.15s;
         }
         .thread-chip:hover { background: rgba(255,255,255,0.2); }
         .thread-chip.active { background: #007aff; border-color: #007aff; color: #fff; }
 
-        /* iOS 玻璃质感按钮 */
         .ios-glass-btn {
-            appearance: none; -webkit-appearance: none;
-            border: 1px solid rgba(255,255,255,0.28);
-            margin: 0; padding: 0; outline: none;
-            font-family: inherit;
-            display: flex; align-items: center; justify-content: center;
-            border-radius: 50%; color: #fff; cursor: pointer;
-            background: rgba(20,20,20,0.4);
-            -webkit-backdrop-filter: blur(20px) saturate(180%);
-            backdrop-filter: blur(20px) saturate(180%);
-            box-shadow: 0 4px 18px rgba(0,0,0,0.25),
-                        inset 0 1px 0 rgba(255,255,255,0.18),
-                        0 0 10px rgba(255,255,255,0.15);
-            transition: transform 0.22s cubic-bezier(.34,1.56,.64,1),
-                        background 0.15s, box-shadow 0.15s;
+            appearance: none; -webkit-appearance: none; border: 1px solid rgba(255,255,255,0.28);
+            margin: 0; padding: 0; outline: none; font-family: inherit;
+            display: flex; align-items: center; justify-content: center; border-radius: 50%;
+            color: #fff; cursor: pointer; background: rgba(20,20,20,0.4);
+            -webkit-backdrop-filter: blur(20px) saturate(180%); backdrop-filter: blur(20px) saturate(180%);
+            box-shadow: 0 4px 18px rgba(0,0,0,0.25), inset 0 1px 0 rgba(255,255,255,0.18), 0 0 10px rgba(255,255,255,0.15);
+            transition: transform 0.22s cubic-bezier(.34,1.56,.64,1), background 0.15s, box-shadow 0.15s;
             transform: scale(1); width: 40px; height: 40px;
         }
         .ios-glass-btn:hover {
             background: rgba(46,46,46,0.5);
-            box-shadow: 0 6px 24px rgba(0,0,0,0.35),
-                        inset 0 1px 0 rgba(255,255,255,0.22),
-                        0 0 18px rgba(255,255,255,0.3);
+            box-shadow: 0 6px 24px rgba(0,0,0,0.35), inset 0 1px 0 rgba(255,255,255,0.22), 0 0 18px rgba(255,255,255,0.3);
         }
         .ios-glass-btn:active { transform: scale(0.92); }
         .ios-glass-btn:disabled { opacity: 0.4; pointer-events: none; }
         .ios-glass-btn svg { width: 18px; height: 18px; }
-
-        .ios-glass-btn.download-btn {
-            background: rgba(0,122,255,0.3);
-            border-color: rgba(0,122,255,0.5);
-        }
+        .ios-glass-btn.download-btn { background: rgba(0,122,255,0.3); border-color: rgba(0,122,255,0.5); }
         .ios-glass-btn.download-btn:hover { background: rgba(0,122,255,0.45); }
-        .ios-glass-btn.download-btn.retry {
-            background: rgba(255,159,10,0.3);
-            border-color: rgba(255,159,10,0.5);
-        }
+        .ios-glass-btn.download-btn.retry { background: rgba(255,159,10,0.3); border-color: rgba(255,159,10,0.5); }
         .ios-glass-btn.download-btn.retry:hover { background: rgba(255,159,10,0.45); }
         .ios-glass-btn.pause-btn { background: rgba(255,255,255,0.1); }
-        .cleanup-btn {
-            background: rgba(255,59,48,0.3);
-            border-color: rgba(255,59,48,0.5);
-            display: none; margin-left: auto;
-        }
+        .cleanup-btn { background: rgba(255,59,48,0.3); border-color: rgba(255,59,48,0.5); display: none; margin-left: auto; }
         .cleanup-btn:hover { background: rgba(255,59,48,0.45); }
 
-        /* 进度条 */
-        .progress-wrap {
-            height: 8px; background: rgba(255,255,255,0.12);
-            border-radius: 4px; overflow: hidden;
-            margin: 10px 0 12px 0;
-        }
-        .progress-bar {
-            height: 100%; background: #007aff;
-            width: 0%; transition: width 0.3s;
-        }
+        .progress-wrap { height: 8px; background: rgba(255,255,255,0.12); border-radius: 4px; overflow: hidden; margin: 10px 0 12px 0; }
+        .progress-bar { height: 100%; background: #007aff; width: 0%; transition: width 0.3s; }
         .progress-bar.error-bar { background: #ff9f0a; }
 
-        .info-row {
-            display: flex; justify-content: space-between;
-            font-size: 11px; opacity: 0.8; margin-bottom: 4px;
-        }
+        .info-row { display: flex; justify-content: space-between; font-size: 11px; opacity: 0.8; margin-bottom: 4px; }
 
-        /* 状态栏（高光上分隔线） */
-        .status-text {
-            font-size: 12px; opacity: 0.8;
-            word-break: break-all; line-height: 1.4;
+        /* 底部状态行：左右对齐，上方高光分隔线 */
+        .bottom-row {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
             padding-top: 8px;
             border-top: 1px solid rgba(255,255,255,0.15);
         }
+        .status-text {
+            font-size: 12px; opacity: 0.8; word-break: break-all; line-height: 1.5;
+            flex: 1;
+        }
         .status-text.error-text { color: #ff9f0a; }
-
         .mode-info {
-            position: absolute; bottom: 16px; right: 16px;
             font-size: 11px; opacity: 0.7; color: #fff;
-            pointer-events: none;
+            white-space: nowrap;
+            margin-left: 10px;
         }
     `;
     const style = document.createElement('style');
@@ -241,7 +168,6 @@
     };
 
     // ========== 工具函数 ==========
-    // 嗅探页面中的 m3u8 链接
     function sniffM3u8() {
         const videos = document.querySelectorAll('video');
         for (const v of videos) {
@@ -280,19 +206,14 @@
         return '';
     }
 
-    // 复制到剪贴板
     async function copyToClipboard(text) {
         try {
-            if (typeof GM_setClipboard !== 'undefined') {
-                GM_setClipboard(text, 'text');
-                return true;
-            }
+            if (typeof GM_setClipboard !== 'undefined') { GM_setClipboard(text, 'text'); return true; }
             await navigator.clipboard.writeText(text);
             return true;
         } catch (_) { return false; }
     }
 
-    // 通用 GM_xmlhttpRequest 请求封装（用于密钥等二进制资源）
     function gmRequest(url, responseType = 'text', timeout = REQUEST_TIMEOUT) {
         return new Promise((resolve, reject) => {
             GM_xmlhttpRequest({
@@ -304,25 +225,18 @@
         });
     }
 
-    // AES-128-CBC 解密（Web Crypto API）
     async function aesDecrypt(ciphertext, keyBytes, ivBytes) {
         const key = await crypto.subtle.importKey('raw', keyBytes, { name: 'AES-CBC' }, false, ['decrypt']);
         const out = await crypto.subtle.decrypt({ name: 'AES-CBC', iv: ivBytes }, key, ciphertext);
         return new Uint8Array(out);
     }
 
-    // 获取真实的 m3u8 内容（处理变体播放列表，解析加密信息）
     async function fetchRealM3u8(url) {
         const text = await new Promise(resolve => {
-            GM_xmlhttpRequest({
-                method: 'GET', url, timeout: REQUEST_TIMEOUT,
-                onload: r => resolve(r.responseText),
-                onerror: () => resolve(null), ontimeout: () => resolve(null)
-            });
+            GM_xmlhttpRequest({ method: 'GET', url, timeout: REQUEST_TIMEOUT, onload: r => resolve(r.responseText), onerror: () => resolve(null), ontimeout: () => resolve(null) });
         });
         if (!text) return null;
 
-        // 主播放列表（变体）
         if (text.includes('#EXT-X-STREAM-INF')) {
             const lines = text.split('\n');
             let bestBandwidth = 0, bestUrl = '';
@@ -330,31 +244,23 @@
                 const line = lines[i].trim();
                 if (line.startsWith('#EXT-X-STREAM-INF')) {
                     const bw = parseInt((line.match(/BANDWIDTH=(\d+)/) || [])[1]) || 0;
-                    if (i + 1 < lines.length) {
-                        const sub = lines[i + 1].trim();
-                        if (sub && !sub.startsWith('#')) {
-                            if (bw > bestBandwidth) { bestBandwidth = bw; bestUrl = sub; }
-                        }
-                    }
+                    if (i + 1 < lines.length) { const sub = lines[i + 1].trim(); if (sub && !sub.startsWith('#')) { if (bw > bestBandwidth) { bestBandwidth = bw; bestUrl = sub; } } }
                 }
             }
             if (bestUrl) return fetchRealM3u8(new URL(bestUrl, url).href);
             return null;
         }
 
-        // 普通 m3u8，解析片段和加密信息
         const lines = text.split('\n');
         let mapUri = null;
         const segments = [];
         let totalDuration = 0;
-        let currentKey = null; // { method, uri, iv }
+        let currentKey = null;
 
         for (const line of lines) {
             const t = line.trim();
-            if (t.startsWith('#EXT-X-MAP:URI=')) {
-                const m = t.match(/URI="([^"]+)"/);
-                if (m) mapUri = new URL(m[1], url).href;
-            } else if (t.startsWith('#EXT-X-KEY:')) {
+            if (t.startsWith('#EXT-X-MAP:URI=')) { const m = t.match(/URI="([^"]+)"/); if (m) mapUri = new URL(m[1], url).href; }
+            else if (t.startsWith('#EXT-X-KEY:')) {
                 const methodMatch = t.match(/METHOD=([^,]+)/);
                 const uriMatch = t.match(/URI="([^"]+)"/);
                 const ivMatch = t.match(/IV=0x([0-9a-fA-F]+)/);
@@ -363,30 +269,20 @@
                     const keyUri = uriMatch ? new URL(uriMatch[1], url).href : null;
                     const iv = ivMatch ? ivMatch[1] : null;
                     currentKey = { method, uri: keyUri, iv };
-                } else if (method === 'NONE') {
-                    currentKey = null;
-                }
+                } else if (method === 'NONE') { currentKey = null; }
             } else if (t.startsWith('#EXTINF:')) {
                 const dur = parseFloat(t.split(':')[1].replace(',', ''));
                 if (!isNaN(dur)) totalDuration += dur;
             } else if (t && !t.startsWith('#')) {
-                try {
-                    const segUrl = new URL(t, url).href;
-                    segments.push({ url: segUrl, key: currentKey });
-                } catch (_) {}
+                try { segments.push({ url: new URL(t, url).href, key: currentKey }); } catch (_) {}
             }
         }
         return { mapUri, segments, totalDuration, rawText: text };
     }
 
-    // 根据时长估算文件大小
-    function estimateFileSize(duration) {
-        return duration * ESTIMATED_BITRATE / 8 * 1.1;
-    }
+    function estimateFileSize(duration) { return duration * ESTIMATED_BITRATE / 8 * 1.1; }
 
-    // 下载并解密单个片段
     async function downloadAndDecrypt(segUrl, referer, signal, keyInfo, keyCache, segmentIndex, retries = MAX_RETRIES) {
-        // 下载密文
         const blob = await new Promise((resolve, reject) => {
             const attempt = (n) => {
                 if (signal && signal.aborted) return reject(new Error('aborted'));
@@ -395,12 +291,9 @@
                     headers: { 'Referer': referer, 'Origin': new URL(referer).origin },
                     onload: r => {
                         if (signal && signal.aborted) return reject(new Error('aborted'));
-                        if (r.status >= 200 && r.status < 300 && r.response && r.response.size > 0) {
-                            resolve(r.response);
-                        } else {
-                            if (n > 1) setTimeout(() => attempt(n - 1), 500);
-                            else reject(new Error(`HTTP ${r.status}`));
-                        }
+                        if (r.status >= 200 && r.status < 300 && r.response && r.response.size > 0) resolve(r.response);
+                        else if (n > 1) setTimeout(() => attempt(n - 1), 500);
+                        else reject(new Error(`HTTP ${r.status}`));
                     },
                     onerror: () => { if (signal && signal.aborted) return reject(new Error('aborted')); if (n > 1) setTimeout(() => attempt(n - 1), 500); else reject(new Error('network')); },
                     ontimeout: () => { if (signal && signal.aborted) return reject(new Error('aborted')); if (n > 1) setTimeout(() => attempt(n - 1), 500); else reject(new Error('timeout')); }
@@ -410,44 +303,34 @@
             attempt(retries);
         });
 
-        // 无加密直接返回
         if (!keyInfo) return blob;
 
-        // 获取密钥字节
         let keyBytes = keyCache.get(keyInfo.uri);
         if (!keyBytes) {
             keyBytes = new Uint8Array(await gmRequest(keyInfo.uri, 'arraybuffer'));
             keyCache.set(keyInfo.uri, keyBytes);
         }
 
-        // 计算 IV
         let ivBytes;
         if (keyInfo.iv) {
-            // 显式 IV
             ivBytes = new Uint8Array(keyInfo.iv.match(/.{2}/g).map(byte => parseInt(byte, 16)));
         } else {
-            // 隐式 IV：使用片段索引（大端序）
             const ivBuffer = new ArrayBuffer(16);
             const ivView = new DataView(ivBuffer);
             ivView.setBigUint64(8, BigInt(segmentIndex), false);
             ivBytes = new Uint8Array(ivBuffer);
         }
 
-        // 解密
         const cipherBuf = await blob.arrayBuffer();
         const plainBuf = await aesDecrypt(cipherBuf, keyBytes, ivBytes);
         return new Blob([plainBuf], { type: 'video/mp2t' });
     }
 
-    // 获取目录句柄（磁盘模式），支持缓存和权限续期
     async function getDirectoryHandle() {
         if (savedDirHandle) {
             const state = await savedDirHandle.queryPermission({ mode: 'readwrite' });
             if (state === 'granted') return savedDirHandle;
-            if (state === 'prompt') {
-                const newState = await savedDirHandle.requestPermission({ mode: 'readwrite' });
-                if (newState === 'granted') return savedDirHandle;
-            }
+            if (state === 'prompt') { const ns = await savedDirHandle.requestPermission({ mode: 'readwrite' }); if (ns === 'granted') return savedDirHandle; }
             savedDirHandle = null;
         }
         try {
@@ -463,241 +346,150 @@
     // ========== 下载控制类 ==========
     class DownloadController {
         constructor(ui, url, concurrency) {
-            this.ui = ui;
-            this.url = url;
-            this.concurrency = concurrency;
-            this.abortController = null;
-            this.paused = false;
-            this.completed = 0;
-            this.total = 0;
-            this.bytes = 0;
-            this.startTime = 0;
-            this.mode = 'memory';       // 'memory' 或 'disk'
-            this.writable = null;
-            this.dirHandle = null;
-            this.segmentBlobs = [];      // 内存模式按索引存储解密后的 TS 片段
-            this.mapBlob = null;         // 初始化段 Blob
-            this.currentFilename = '';
-            this.previousFilename = '';
-            this.segments = [];          // { url, key }
-            this.mapUri = null;
-            this.keyCache = new Map();   // 密钥缓存
+            this.ui = ui; this.url = url; this.concurrency = concurrency;
+            this.abortController = null; this.paused = false;
+            this.completed = 0; this.total = 0; this.bytes = 0; this.startTime = 0;
+            this.mode = 'memory'; this.writable = null; this.dirHandle = null;
+            this.segmentBlobs = []; this.mapBlob = null;
+            this.currentFilename = ''; this.previousFilename = '';
+            this.segments = []; this.mapUri = null; this.keyCache = new Map();
         }
 
-        // 启动下载
         async run() {
             const { panel, ball } = this.ui;
-            const progressBar = panel.querySelector('.progress-bar');
-            const progressText = panel.querySelector('#progress-text');
-            const speedText = panel.querySelector('#speed-text');
-            const statusText = panel.querySelector('#status-text');
-            const downloadBtn = panel.querySelector('#download-btn');
-            const pauseBtn = panel.querySelector('#pause-btn');
-            const cleanupBtn = panel.querySelector('#cleanup-btn');
-            const modeInfo = panel.querySelector('#mode-info');
+            const pb = panel.querySelector('.progress-bar'), pt = panel.querySelector('#progress-text');
+            const st = panel.querySelector('#speed-text'), status = panel.querySelector('#status-text');
+            const dBtn = panel.querySelector('#download-btn'), pBtn = panel.querySelector('#pause-btn');
+            const cBtn = panel.querySelector('#cleanup-btn'), mInfo = panel.querySelector('#mode-info');
 
-            // 重置 UI
-            progressBar.style.width = '0%';
-            progressBar.classList.remove('error-bar');
-            progressText.textContent = '0%';
-            speedText.textContent = '0 KB/s';
-            statusText.textContent = '📡 正在获取 M3U8...';
-            statusText.classList.remove('error-text');
-            downloadBtn.disabled = true;
-            downloadBtn.classList.remove('retry');
-            downloadBtn.innerHTML = ICONS.download;
-            pauseBtn.disabled = true;
-            pauseBtn.innerHTML = ICONS.pause;
-            cleanupBtn.style.display = 'none';
-            modeInfo.textContent = '';
-            ball.classList.remove('done', 'error');
+            pb.style.width = '0%'; pb.classList.remove('error-bar'); pt.textContent = '0%'; st.textContent = '0 KB/s';
+            status.textContent = '📡 正在获取 M3U8...'; status.classList.remove('error-text');
+            dBtn.disabled = true; dBtn.classList.remove('retry'); dBtn.innerHTML = ICONS.download;
+            pBtn.disabled = true; pBtn.innerHTML = ICONS.pause; cBtn.style.display = 'none'; mInfo.textContent = '';
+            ball.classList.remove('done','error');
 
             try {
-                // 1. 获取真实 M3U8
                 const manifest = await fetchRealM3u8(this.url);
                 if (!manifest || !manifest.segments.length) throw new Error('无法解析 M3U8');
 
-                // 检查是否有不支持的加密方式
                 const unsupported = manifest.segments.some(seg => seg.key && seg.key.method !== 'AES-128');
                 if (unsupported) {
-                    statusText.textContent = '🔐 检测到不支持的加密方式，已复制链接，请用 N_m3u8DL 下载';
-                    statusText.classList.add('error-text');
-                    GM_setClipboard(this.url, 'text');
+                    status.textContent = '🔐 不支持的加密方式，已复制链接，请用 N_m3u8DL 下载';
+                    status.classList.add('error-text'); GM_setClipboard(this.url, 'text');
                     throw new Error('unsupported-encryption');
                 }
 
-                this.mapUri = manifest.mapUri;
-                this.segments = manifest.segments; // [{ url, key }]
-                this.total = this.segments.length;
-                this.totalDuration = manifest.totalDuration;
-                this.estimatedSize = estimateFileSize(this.totalDuration);
+                this.mapUri = manifest.mapUri; this.segments = manifest.segments; this.total = this.segments.length;
+                this.totalDuration = manifest.totalDuration; this.estimatedSize = estimateFileSize(this.totalDuration);
 
-                // 决定存储模式
-                if (this.totalDuration > 0 && this.estimatedSize <= SIZE_THRESHOLD) {
-                    this.mode = 'memory';
-                } else {
-                    this.mode = 'disk';
+                let useDisk = (this.totalDuration > 0 && this.estimatedSize > SIZE_THRESHOLD) || this.totalDuration === 0;
+                if (useDisk && typeof window.showDirectoryPicker !== 'function') { useDisk = false; }
+                else if (useDisk) {
+                    try { this.dirHandle = await getDirectoryHandle(); }
+                    catch (err) {
+                        if (err.message === 'CrossOriginIframe') { useDisk = false; status.textContent = '⚠️ 跨域iframe，已自动切换为内存下载'; }
+                        else if (err.message === '用户取消') throw err; else throw err;
+                    }
                 }
-                const modeLabel = this.mode === 'disk' ? '边下边存' : '内存下载';
-                const sizeEst = this.totalDuration > 0 ? `预估 ${(this.estimatedSize/1024/1024).toFixed(0)}MB` : '无法预估时长';
-                modeInfo.textContent = `💡 ${modeLabel} · ${sizeEst}`;
+                this.mode = useDisk ? 'disk' : 'memory';
+                mInfo.textContent = `💡 ${this.mode === 'disk' ? '边下边存' : '内存下载'} · ${this.totalDuration > 0 ? `预估 ${(this.estimatedSize/1024/1024).toFixed(0)}MB` : '无法预估时长'}`;
 
-                // 下载初始化段 (MAP) - 也可能被加密，暂时使用无加密方式下载（MAP 段通常无加密）
                 if (this.mapUri) {
-                    statusText.textContent = `📥 初始化段...`;
-                    const mapBlob = await downloadAndDecrypt(this.mapUri, this.url, null, null, this.keyCache, 0, MAX_RETRIES);
-                    this.mapBlob = mapBlob;
+                    status.textContent = '📥 初始化段...';
+                    this.mapBlob = await downloadAndDecrypt(this.mapUri, this.url, null, null, this.keyCache, 0, MAX_RETRIES);
                 }
 
-                if (this.mode === 'disk') {
-                    await this._diskModeRun();
-                } else {
-                    await this._memoryModeRun();
-                }
+                if (this.mode === 'disk') await this._diskModeRun();
+                else await this._memoryModeRun();
             } catch (err) {
-                if (['encrypted','no-fs','CrossOriginIframe','用户取消','unsupported-encryption'].includes(err.message)) {
-                    ball.classList.add('error');
-                    downloadBtn.disabled = false;
-                    pauseBtn.disabled = true;
+                if (['encrypted','unsupported-encryption','用户取消'].includes(err.message)) {
+                    ball.classList.add('error'); dBtn.disabled = false; pBtn.disabled = true;
                     return;
                 }
-                statusText.textContent = '❌ ' + err.message;
-                statusText.classList.add('error-text');
-                downloadBtn.disabled = false;
-                pauseBtn.disabled = true;
-                ball.classList.add('error');
-            } finally {
-                if (!this.paused) {
-                    currentDownload = null;
-                }
-                // 清理密钥缓存
-                this.keyCache.clear();
+                status.textContent = '❌ ' + err.message;
+                status.classList.add('error-text'); dBtn.disabled = false; pBtn.disabled = true; ball.classList.add('error');
             }
         }
 
-        // 磁盘模式（串行可靠下载 + 解密）
         async _diskModeRun() {
             const { panel, ball } = this.ui;
-            const progressBar = panel.querySelector('.progress-bar');
-            const progressText = panel.querySelector('#progress-text');
-            const speedText = panel.querySelector('#speed-text');
-            const statusText = panel.querySelector('#status-text');
-            const downloadBtn = panel.querySelector('#download-btn');
-            const pauseBtn = panel.querySelector('#pause-btn');
-            const cleanupBtn = panel.querySelector('#cleanup-btn');
+            const pb = panel.querySelector('.progress-bar'), pt = panel.querySelector('#progress-text');
+            const st = panel.querySelector('#speed-text'), status = panel.querySelector('#status-text');
+            const dBtn = panel.querySelector('#download-btn'), pBtn = panel.querySelector('#pause-btn');
+            const cBtn = panel.querySelector('#cleanup-btn');
 
-            try {
-                this.dirHandle = await getDirectoryHandle();
-            } catch (err) {
-                if (err.message === 'CrossOriginIframe') {
-                    statusText.textContent = '⚠️ 跨域iframe，已复制链接';
-                    GM_setClipboard(this.url, 'text');
-                    throw new Error('CrossOriginIframe');
-                } else if (err.message === '用户取消') {
-                    statusText.textContent = '已取消';
-                    downloadBtn.disabled = false;
-                    pauseBtn.disabled = true;
-                    return;
-                } else throw err;
-            }
+            if (!this.dirHandle) throw new Error('目录句柄不可用');
             this.currentFilename = `video_${Date.now()}.mp4`;
             const fh = await this.dirHandle.getFileHandle(this.currentFilename, { create: true });
             this.writable = await fh.createWritable();
 
-            // 先写入 MAP 段
-            if (this.mapBlob) {
-                await this.writable.write(this.mapBlob);
-            }
+            if (this.mapBlob) await this.writable.write(this.mapBlob);
 
-            this.completed = 0;
-            this.bytes = this.mapBlob ? this.mapBlob.size : 0;
-            this.startTime = Date.now();
-            this.abortController = new AbortController();
+            this.completed = 0; this.bytes = this.mapBlob ? this.mapBlob.size : 0;
+            this.startTime = Date.now(); this.abortController = new AbortController();
 
-            pauseBtn.disabled = false;
-            pauseBtn.innerHTML = ICONS.pause;
-            pauseBtn.onclick = () => this.togglePause();
+            pBtn.disabled = false; pBtn.innerHTML = ICONS.pause;
+            pBtn.onclick = () => this.togglePause();
 
             const updateProgress = () => {
                 const pct = (this.completed / this.total * 100).toFixed(1);
-                progressBar.style.width = pct + '%';
-                progressText.textContent = `${pct}% (${this.completed}/${this.total})`;
+                pb.style.width = pct + '%'; pt.textContent = `${pct}% (${this.completed}/${this.total})`;
                 const elapsed = (Date.now() - this.startTime) / 1000;
-                const spd = elapsed > 0 ? (this.bytes / 1024 / elapsed).toFixed(1) : '0';
-                speedText.textContent = `${spd} KB/s`;
+                st.textContent = `${elapsed > 0 ? (this.bytes / 1024 / elapsed).toFixed(1) : '0'} KB/s`;
             };
 
-            statusText.textContent = `📥 下载中 (${this.total} 片段，串行)`;
+            status.textContent = `📥 下载中 (${this.total} 片段，串行)`;
 
             for (let i = 0; i < this.segments.length; i++) {
                 if (this.paused) {
-                    statusText.textContent = '⏸️ 已暂停，点击 ▶ 继续';
-                    pauseBtn.disabled = false;
-                    downloadBtn.disabled = true;
+                    cBtn.style.display = 'flex';
+                    status.textContent = '⏸️ 已暂停，点击 ▶ 继续';
+                    pBtn.disabled = false; dBtn.disabled = true;
                     return;
                 }
                 const seg = this.segments[i];
                 let success = false;
                 while (!success && !this.paused) {
                     try {
-                        const decryptedBlob = await downloadAndDecrypt(
-                            seg.url, this.url, this.abortController.signal,
-                            seg.key, this.keyCache, i, 9999 // 磁盘模式无限重试
-                        );
+                        const blob = await downloadAndDecrypt(seg.url, this.url, this.abortController.signal, seg.key, this.keyCache, i, 9999);
                         if (this.paused) return;
-                        await this.writable.write(decryptedBlob);
-                        this.bytes += decryptedBlob.size;
-                        this.completed++;
-                        updateProgress();
+                        await this.writable.write(blob);
+                        this.bytes += blob.size; this.completed++; updateProgress();
                         success = true;
                     } catch (err) {
                         if (err.message === 'aborted') return;
-                        statusText.textContent = `🔄 片段 ${i+1} 重试中...`;
+                        status.textContent = `🔄 片段 ${i+1} 重试中...`;
                     }
                 }
             }
 
             await this.writable.close();
             if (this.paused) {
-                statusText.textContent = '⏸️ 已暂停，点击 ▶ 继续';
-                pauseBtn.disabled = false;
-                downloadBtn.disabled = true;
+                cBtn.style.display = 'flex';
+                status.textContent = '⏸️ 已暂停，点击 ▶ 继续';
+                pBtn.disabled = false; dBtn.disabled = true;
                 return;
             }
 
-            if (this.previousFilename && this.dirHandle) {
-                try { await this.dirHandle.removeEntry(this.previousFilename); } catch(_) {}
-            }
+            if (this.previousFilename && this.dirHandle) { try { await this.dirHandle.removeEntry(this.previousFilename); } catch(_) {} }
             const fileSizeMB = (this.bytes / 1024 / 1024).toFixed(2);
-            progressBar.style.width = '100%';
-            progressBar.classList.remove('error-bar');
-            progressText.textContent = '100%';
-            ball.classList.add('done');
-            downloadBtn.disabled = false;
-            pauseBtn.disabled = true;
-            downloadBtn.classList.remove('retry');
-            downloadBtn.innerHTML = ICONS.download;
-            cleanupBtn.style.display = 'flex';
-            statusText.textContent = `✅ 完成：${this.currentFilename} (${fileSizeMB}MB)`;
-            if (typeof GM_notification !== 'undefined') {
-                GM_notification({ title: '下载完成', text: `${fileSizeMB}MB`, timeout: 5000 });
-            }
+            pb.style.width = '100%'; pb.classList.remove('error-bar'); pt.textContent = '100%';
+            ball.classList.add('done'); dBtn.disabled = false; pBtn.disabled = true;
+            dBtn.classList.remove('retry'); dBtn.innerHTML = ICONS.download;
+            cBtn.style.display = 'flex';
+            status.textContent = `✅ 完成：${this.currentFilename} (${fileSizeMB}MB)`;
+            if (typeof GM_notification !== 'undefined') GM_notification({ title: '下载完成', text: `${fileSizeMB}MB`, timeout: 5000 });
         }
 
-        // 内存模式（并发 + 集中重试，保证顺序 + 解密）
         async _memoryModeRun() {
             const { panel, ball } = this.ui;
-            const progressBar = panel.querySelector('.progress-bar');
-            const progressText = panel.querySelector('#progress-text');
-            const speedText = panel.querySelector('#speed-text');
-            const statusText = panel.querySelector('#status-text');
-            const downloadBtn = panel.querySelector('#download-btn');
-            const pauseBtn = panel.querySelector('#pause-btn');
-            const cleanupBtn = panel.querySelector('#cleanup-btn');
+            const pb = panel.querySelector('.progress-bar'), pt = panel.querySelector('#progress-text');
+            const st = panel.querySelector('#speed-text'), status = panel.querySelector('#status-text');
+            const dBtn = panel.querySelector('#download-btn'), pBtn = panel.querySelector('#pause-btn');
+            const cBtn = panel.querySelector('#cleanup-btn');
 
             this.segmentBlobs = new Array(this.total).fill(null);
-            this.completed = 0;
-            this.bytes = this.mapBlob ? this.mapBlob.size : 0;
+            this.completed = 0; this.bytes = this.mapBlob ? this.mapBlob.size : 0;
             this.startTime = Date.now();
             const failed = [];
             this.abortController = new AbortController();
@@ -705,185 +497,119 @@
             const queue = this.segments.map((seg, idx) => ({ ...seg, idx }));
             const concurrency = this.concurrency;
 
-            pauseBtn.disabled = false;
-            pauseBtn.innerHTML = ICONS.pause;
-            pauseBtn.onclick = () => this.togglePause();
+            pBtn.disabled = false; pBtn.innerHTML = ICONS.pause;
+            pBtn.onclick = () => this.togglePause();
 
             const updateProgress = () => {
                 const pct = (this.completed / this.total * 100).toFixed(1);
-                progressBar.style.width = pct + '%';
-                progressText.textContent = `${pct}% (${this.completed}/${this.total})`;
+                pb.style.width = pct + '%'; pt.textContent = `${pct}% (${this.completed}/${this.total})`;
                 const elapsed = (Date.now() - this.startTime) / 1000;
-                const spd = elapsed > 0 ? (this.bytes / 1024 / elapsed).toFixed(1) : '0';
-                speedText.textContent = `${spd} KB/s`;
+                st.textContent = `${elapsed > 0 ? (this.bytes / 1024 / elapsed).toFixed(1) : '0'} KB/s`;
             };
 
-            statusText.textContent = `📥 下载中 (${this.total} 片段，并发)`;
+            status.textContent = `📥 下载中 (${this.total} 片段，并发)`;
 
             const downloadOne = async (segUrl, keyInfo, idx) => {
                 try {
                     const blob = await downloadAndDecrypt(segUrl, this.url, this.abortController.signal, keyInfo, this.keyCache, idx, MAX_RETRIES);
                     if (this.paused) return;
                     this.segmentBlobs[idx] = blob;
-                    this.bytes += blob.size;
-                    this.completed++;
-                    updateProgress();
+                    this.bytes += blob.size; this.completed++; updateProgress();
                 } catch (err) {
                     if (err.message === 'aborted') return;
                     failed.push({ url: segUrl, key: keyInfo, idx });
-                    this.completed++;
-                    updateProgress();
+                    this.completed++; updateProgress();
                 }
             };
 
-            const workers = [];
-            for (let i = 0; i < concurrency; i++) {
-                workers.push((async () => {
-                    while (queue.length > 0) {
-                        if (this.paused) return;
-                        const seg = queue.shift();
-                        if (!seg) continue;
-                        await downloadOne(seg.url, seg.key, seg.idx);
-                    }
-                })());
-            }
+            const workers = []; for (let i = 0; i < concurrency; i++) workers.push((async () => { while (queue.length > 0) { if (this.paused) return; const seg = queue.shift(); if (seg) await downloadOne(seg.url, seg.key, seg.idx); } })());
             await Promise.all(workers);
 
             for (let round = 0; round < FINAL_RETRY_ROUNDS && failed.length > 0 && !this.paused; round++) {
-                statusText.textContent = `🔄 重试 ${round+1}/${FINAL_RETRY_ROUNDS} (${failed.length}个)`;
-                const retryList = [...failed];
-                failed.length = 0;
+                status.textContent = `🔄 重试 ${round+1}/${FINAL_RETRY_ROUNDS} (${failed.length}个)`;
+                const retryList = [...failed]; failed.length = 0;
                 const rworkers = [];
-                for (let i = 0; i < concurrency; i++) {
-                    rworkers.push((async () => {
-                        while (retryList.length > 0) {
-                            if (this.paused) return;
-                            const item = retryList.shift();
-                            try {
-                                const blob = await downloadAndDecrypt(item.url, this.url, this.abortController.signal, item.key, this.keyCache, item.idx, MAX_RETRIES);
-                                if (this.paused) return;
-                                this.segmentBlobs[item.idx] = blob;
-                                this.bytes += blob.size;
-                            } catch (err) {
-                                if (err.message === 'aborted') return;
-                                failed.push(item);
-                            }
-                        }
-                    })());
-                }
+                for (let i = 0; i < concurrency; i++) rworkers.push((async () => { while (retryList.length > 0) { if (this.paused) return; const item = retryList.shift(); try { const blob = await downloadAndDecrypt(item.url, this.url, this.abortController.signal, item.key, this.keyCache, item.idx, MAX_RETRIES); if (this.paused) return; this.segmentBlobs[item.idx] = blob; this.bytes += blob.size; } catch (err) { if (err.message === 'aborted') return; failed.push(item); } } })());
                 await Promise.all(rworkers);
             }
 
             if (this.paused) {
-                statusText.textContent = '⏸️ 已暂停，点击 ▶ 继续';
-                pauseBtn.disabled = false;
-                downloadBtn.disabled = true;
+                cBtn.style.display = 'flex';
+                status.textContent = '⏸️ 已暂停，点击 ▶ 继续';
+                pBtn.disabled = false; dBtn.disabled = true;
                 return;
             }
 
-            cleanupBtn.style.display = 'flex';
+            cBtn.style.display = 'flex';
 
             if (failed.length === 0) {
                 const missing = this.segmentBlobs.findIndex(b => b === null);
                 if (missing !== -1) throw new Error(`片段 ${missing} 丢失`);
 
                 const fileSizeMB = (this.bytes / 1024 / 1024).toFixed(2);
-                progressBar.style.width = '100%';
-                progressBar.classList.remove('error-bar');
-                progressText.textContent = '100%';
-                ball.classList.add('done');
-                downloadBtn.disabled = false;
-                pauseBtn.disabled = true;
-                downloadBtn.classList.remove('retry');
-                downloadBtn.innerHTML = ICONS.download;
+                pb.style.width = '100%'; pb.classList.remove('error-bar'); pt.textContent = '100%';
+                ball.classList.add('done'); dBtn.disabled = false; pBtn.disabled = true;
+                dBtn.classList.remove('retry'); dBtn.innerHTML = ICONS.download;
 
                 const blobs = this.mapBlob ? [this.mapBlob, ...this.segmentBlobs] : this.segmentBlobs;
                 const finalBlob = new Blob(blobs, { type: 'video/mp4' });
                 const blobUrl = URL.createObjectURL(finalBlob);
-                const a = document.createElement('a');
-                a.href = blobUrl;
-                a.download = `video_${Date.now()}.mp4`;
-                document.body.appendChild(a);
-                a.click();
-                a.remove();
-                URL.revokeObjectURL(blobUrl);
-                statusText.textContent = `✅ 完成 (${fileSizeMB}MB)`;
-                if (typeof GM_notification !== 'undefined') {
-                    GM_notification({ title: '下载完成', text: `${fileSizeMB}MB`, timeout: 5000 });
-                }
+                const a = document.createElement('a'); a.href = blobUrl; a.download = `video_${Date.now()}.mp4`;
+                document.body.appendChild(a); a.click(); a.remove(); URL.revokeObjectURL(blobUrl);
+                status.textContent = `✅ 完成 (${fileSizeMB}MB)`;
+                if (typeof GM_notification !== 'undefined') GM_notification({ title: '下载完成', text: `${fileSizeMB}MB`, timeout: 5000 });
             } else {
-                progressBar.classList.add('error-bar');
-                statusText.textContent = `⚠️ ${failed.length}个片段失败，请重试`;
-                statusText.classList.add('error-text');
-                downloadBtn.disabled = false;
-                pauseBtn.disabled = true;
-                downloadBtn.classList.add('retry');
-                downloadBtn.innerHTML = ICONS.retry;
+                pb.classList.add('error-bar');
+                status.textContent = `⚠️ ${failed.length}个片段失败，请重试`;
+                status.classList.add('error-text');
+                dBtn.disabled = false; pBtn.disabled = true;
+                dBtn.classList.add('retry'); dBtn.innerHTML = ICONS.retry;
                 ball.classList.add('error');
             }
         }
 
-        // 暂停/继续
         togglePause() {
             this.paused = !this.paused;
+            const cBtn = this.ui.panel.querySelector('#cleanup-btn');
             if (this.paused) {
                 this.abortController.abort();
                 this.ui.panel.querySelector('#pause-btn').innerHTML = ICONS.play;
                 this.ui.panel.querySelector('#status-text').textContent = '⏸️ 已暂停';
+                cBtn.style.display = 'flex'; // 立即显示清理按钮
             } else {
                 this.abortController = new AbortController();
                 this.ui.panel.querySelector('#pause-btn').innerHTML = ICONS.pause;
+                cBtn.style.display = 'none'; // 继续下载时隐藏清理按钮
                 this.run();
             }
         }
 
-        // 手动释放内存
         manualCleanup() {
             let releasedSize = 0;
-            if (this.segmentBlobs) {
-                releasedSize = this.segmentBlobs.reduce((s, b) => s + (b?.size || 0), 0);
-            } else {
-                releasedSize = this.bytes || 0;
-            }
+            if (this.segmentBlobs) releasedSize = this.segmentBlobs.reduce((s, b) => s + (b?.size || 0), 0);
+            else releasedSize = this.bytes || 0;
             const releasedMB = (releasedSize / 1024 / 1024).toFixed(2);
             this.cleanup();
-            const panel = this.ui.panel;
-            panel.querySelector('#cleanup-btn').style.display = 'none';
-            panel.querySelector('#status-text').textContent = `🗑️ 已释放 ${releasedMB} MB 内存`;
+            this.ui.panel.querySelector('#cleanup-btn').style.display = 'none';
+            this.ui.panel.querySelector('#status-text').textContent = `🗑️ 已释放 ${releasedMB} MB 内存`;
         }
 
-        // 清理内部引用
         cleanup() {
-            this.segmentBlobs = null;
-            this.mapBlob = null;
-            this.segments = null;
-            this.keyCache.clear();
-            if (this.abortController) {
-                try { this.abortController.abort(); } catch(_) {}
-                this.abortController = null;
-            }
-            if (this.writable) {
-                try { this.writable.close(); } catch(_) {}
-                this.writable = null;
-            }
+            this.segmentBlobs = null; this.mapBlob = null; this.segments = null; this.keyCache.clear();
+            if (this.abortController) { try { this.abortController.abort(); } catch(_) {} this.abortController = null; }
+            if (this.writable) { try { this.writable.close(); } catch(_) {} this.writable = null; }
         }
     }
 
     // ========== UI 创建 ==========
     function createUI() {
-        const ball = document.createElement('div');
-        ball.id = 'm3u8-drag-ball';
-        ball.innerHTML = '🎬';
-        ball.title = 'M3U8 下载';
-        document.body.appendChild(ball);
-
-        const panel = document.createElement('div');
-        panel.className = 'm3u8-panel';
+        const ball = document.createElement('div'); ball.id = 'm3u8-drag-ball'; ball.innerHTML = '🎬'; ball.title = 'M3U8 下载'; document.body.appendChild(ball);
+        const panel = document.createElement('div'); panel.className = 'm3u8-panel';
         panel.innerHTML = `
             <div class="input-group">
                 <div class="input-icon" id="link-icon" title="复制链接">${ICONS.link}</div>
-               <input class="m3u8-input" type="text" placeholder="m3u8 链接（自动嗅探）" id="url-input">
-               <div class="input-icon input-icon-right" id="refresh-icon" title="重新嗅探">${ICONS.refresh}</div>
+                <input class="m3u8-input" type="text" placeholder="m3u8 链接（自动嗅探）" id="url-input">
+                <div class="input-icon input-icon-right" id="refresh-icon" title="重新嗅探">${ICONS.refresh}</div>
             </div>
             <div class="thread-row">
                 <span class="thread-label">线程</span>
@@ -902,281 +628,85 @@
                 <span id="progress-text">0%</span>
                 <span id="speed-text">0 KB/s</span>
             </div>
-            <div class="status-text" id="status-text">就绪</div>
-            <span class="mode-info" id="mode-info"></span>
+            <div class="bottom-row">
+                <span class="status-text" id="status-text">就绪</span>
+                <span class="mode-info" id="mode-info"></span>
+            </div>
         `;
         document.body.appendChild(panel);
 
-        // 链接复制
-        const linkIcon = panel.querySelector('#link-icon');
-        const urlInput = panel.querySelector('#url-input');
-        linkIcon.addEventListener('click', async (e) => {
-            e.stopPropagation();
-            const link = urlInput.value.trim();
-            if (!link) return;
-            const ok = await copyToClipboard(link);
-            if (ok) {
-                linkIcon.classList.add('copied');
-                linkIcon.innerHTML = ICONS.check;
-                setTimeout(() => {
-                    linkIcon.classList.remove('copied');
-                    linkIcon.innerHTML = ICONS.link;
-                }, 1500);
-                const st = panel.querySelector('#status-text');
-                st.textContent = '✅ 已复制';
-                setTimeout(() => { st.textContent = '就绪'; }, 1500);
-            }
-        });
-        //刷新链接
-        const refreshIcon = panel.querySelector('#refresh-icon');
-        refreshIcon.addEventListener('click', (e) => {
-            e.stopPropagation();
-            const newUrl = sniffM3u8();
-            if (newUrl) {
-                urlInput.value = newUrl;
-                panel.querySelector('#status-text').textContent = '✅ 已更新链接';
-                ball.classList.add('has-url');
-            } else {
-                panel.querySelector('#status-text').textContent = '⚠️ 未检测到 M3U8 链接';
-            }
-            setTimeout(() => {
-                panel.querySelector('#status-text').textContent = '就绪';
-            }, 1500);
-          });
-        // 线程选择
+        const linkIcon = panel.querySelector('#link-icon'), urlInput = panel.querySelector('#url-input'), refreshIcon = panel.querySelector('#refresh-icon');
+        linkIcon.addEventListener('click', async e => { e.stopPropagation(); const link = urlInput.value.trim(); if (!link) return; if (await copyToClipboard(link)) { linkIcon.classList.add('copied'); linkIcon.innerHTML = ICONS.check; setTimeout(() => { linkIcon.classList.remove('copied'); linkIcon.innerHTML = ICONS.link; }, 1500); panel.querySelector('#status-text').textContent = '✅ 已复制'; setTimeout(() => { panel.querySelector('#status-text').textContent = '就绪'; }, 1500); } });
+        refreshIcon.addEventListener('click', e => { e.stopPropagation(); const newUrl = sniffM3u8(); if (newUrl) { urlInput.value = newUrl; panel.querySelector('#status-text').textContent = '✅ 已更新链接'; ball.classList.add('has-url'); } else { panel.querySelector('#status-text').textContent = '⚠️ 未检测到 M3U8 链接'; } setTimeout(() => { panel.querySelector('#status-text').textContent = '就绪'; }, 1500); });
+
         let selThreads = 16;
-        const chips = panel.querySelectorAll('.thread-chip');
-        chips.forEach(c => {
-            c.addEventListener('click', (e) => {
-                e.stopPropagation();
-                chips.forEach(x => x.classList.remove('active'));
-                c.classList.add('active');
-                selThreads = parseInt(c.dataset.threads, 10);
-            });
-        });
+        panel.querySelectorAll('.thread-chip').forEach(c => c.addEventListener('click', e => { e.stopPropagation(); panel.querySelectorAll('.thread-chip').forEach(x => x.classList.remove('active')); c.classList.add('active'); selThreads = parseInt(c.dataset.threads); }));
 
-        // 悬浮球拖动（仅边缘上下移动，水平甩边）
         let dragging = false, edge = 'right', sx = 0, sy = 0, sTop = 0;
-        const updateEdge = () => {
-            const r = ball.getBoundingClientRect();
-            edge = (r.left + r.width/2) < window.innerWidth/2 ? 'left' : 'right';
-            if (edge === 'left') {
-                ball.style.left = '8px';
-                ball.style.right = 'auto';
-            } else {
-                ball.style.right = '8px';
-                ball.style.left = 'auto';
-            }
-        };
+        const updateEdge = () => { const r = ball.getBoundingClientRect(); edge = (r.left + r.width/2) < window.innerWidth/2 ? 'left' : 'right'; if (edge === 'left') { ball.style.left = '8px'; ball.style.right = 'auto'; } else { ball.style.right = '8px'; ball.style.left = 'auto'; } };
         ball.style.top = '80px'; ball.style.right = '12px';
+        ball.addEventListener('pointerdown', e => { if (e.target !== ball) return; dragging = true; ball.setPointerCapture(e.pointerId); e.preventDefault(); sx = e.clientX; sy = e.clientY; sTop = ball.getBoundingClientRect().top; updateEdge(); });
+        window.addEventListener('pointermove', e => { if (!dragging) return; const dx = e.clientX - sx, dy = e.clientY - sy; if (Math.abs(dx) > BALL_SIZE/2) { if (dx > 0 && edge === 'right') { edge = 'left'; sx = e.clientX; ball.style.left = '8px'; ball.style.right = 'auto'; } else if (dx < 0 && edge === 'left') { edge = 'right'; sx = e.clientX; ball.style.right = '8px'; ball.style.left = 'auto'; } sTop = ball.getBoundingClientRect().top; sy = e.clientY; return; } ball.style.top = Math.max(0, Math.min(sTop + dy, window.innerHeight - BALL_SIZE)) + 'px'; });
+        window.addEventListener('pointerup', () => { dragging = false; });
+        window.addEventListener('resize', () => { if (!dragging) updateEdge(); if (panel.classList.contains('open')) positionPanel(); });
 
-        ball.addEventListener('pointerdown', e => {
-            if (e.target !== ball) return;
-            dragging = true;
-            ball.setPointerCapture(e.pointerId);
-            e.preventDefault();
-            sx = e.clientX;
-            sy = e.clientY;
-            sTop = ball.getBoundingClientRect().top;
-            updateEdge();
-        });
-
-        window.addEventListener('pointermove', e => {
-            if (!dragging) return;
-            e.preventDefault();
-            const dx = e.clientX - sx, dy = e.clientY - sy;
-            if (Math.abs(dx) > BALL_SIZE/2) {
-                if (dx > 0 && edge === 'right') {
-                    edge = 'left';
-                    sx = e.clientX;
-                    ball.style.left = '8px';
-                    ball.style.right = 'auto';
-                } else if (dx < 0 && edge === 'left') {
-                    edge = 'right';
-                    sx = e.clientX;
-                    ball.style.right = '8px';
-                    ball.style.left = 'auto';
-                }
-                sTop = ball.getBoundingClientRect().top;
-                sy = e.clientY;
-                return;
-            }
-            let newTop = sTop + dy;
-            newTop = Math.max(0, Math.min(newTop, window.innerHeight - BALL_SIZE));
-            ball.style.top = newTop + 'px';
-            if (edge === 'left') { ball.style.left = '8px'; ball.style.right = 'auto'; }
-            else { ball.style.right = '8px'; ball.style.left = 'auto'; }
-        });
-
-        window.addEventListener('pointerup', () => {
-            if (dragging) {
-                dragging = false;
-                ball.releasePointerCapture(e.pointerId);
-            }
-        });
-
-        window.addEventListener('resize', () => {
-            if (!dragging) {
-                updateEdge();
-                const r = ball.getBoundingClientRect();
-               if (r.bottom > window.innerHeight) {
-                    ball.style.top = Math.max(0, window.innerHeight - BALL_SIZE) + 'px';
-                }
-            }
-            if (panel.classList.contains('open')) positionPanel();
-        });
-
-        // 面板显示/隐藏逻辑
-        panel.addEventListener('click', (e) => {
-            e.stopPropagation(); // 点击面板内部不冒泡
-        });
-
-        ball.addEventListener('click', (e) => {
-            e.stopPropagation();
-            if (dragging) return;
-            panel.classList.toggle('open');
-            if (panel.classList.contains('open')) positionPanel();
-        });
-
-        document.addEventListener('click', (e) => {
-            // 点击面板外部或悬浮球外部才关闭
-            if (!panel.contains(e.target) && e.target !== ball) {
-                panel.classList.remove('open');
-            }
-        });
+        panel.addEventListener('click', e => e.stopPropagation());
+        ball.addEventListener('click', e => { e.stopPropagation(); if (dragging) return; panel.classList.toggle('open'); if (panel.classList.contains('open')) positionPanel(); });
+        document.addEventListener('click', e => { if (!panel.contains(e.target) && e.target !== ball) panel.classList.remove('open'); });
 
         function positionPanel() {
-            const ballRect = ball.getBoundingClientRect();
-            const panelWidth = panel.getBoundingClientRect().width;
-            const panelHeight = panel.getBoundingClientRect().height;
-            const windowW = window.innerWidth;
-            const windowH = window.innerHeight;
-
+            const br = ball.getBoundingClientRect(), pw = panel.getBoundingClientRect().width, ph = panel.getBoundingClientRect().height;
+            const ww = window.innerWidth, wh = window.innerHeight;
             let left, right;
-            if (edge === 'left') {
-                left = ballRect.right + 10;
-                if (left + panelWidth > windowW) left = windowW - panelWidth - 10;
-            } else {
-                right = windowW - ballRect.left + 10;
-                if (right + panelWidth > windowW) right = windowW - panelWidth - 10;
-            }
-
-            if (edge === 'left') {
-                panel.style.left = left + 'px';
-                panel.style.right = 'auto';
-            } else {
-                panel.style.right = right + 'px';
-                panel.style.left = 'auto';
-            }
-
-            let top = ballRect.top - 10;
-            if (top + panelHeight > windowH) top = windowH - panelHeight - 10;
+            if (edge === 'left') { left = br.right + 10; if (left + pw > ww) left = ww - pw - 10; }
+            else { right = ww - br.left + 10; if (right + pw > ww) right = ww - pw - 10; }
+            if (edge === 'left') { panel.style.left = left + 'px'; panel.style.right = 'auto'; }
+            else { panel.style.right = right + 'px'; panel.style.left = 'auto'; }
+            let top = br.top - 10;
+            if (top + ph > wh) top = wh - ph - 10;
             if (top < 10) top = 10;
             panel.style.top = top + 'px';
         }
+        window.addEventListener('resize', () => { if (panel.classList.contains('open')) positionPanel(); });
 
-        return {
-            ball,
-            panel,
-            showBall: () => { ball.style.display = 'flex'; },
-            hideBall: () => { ball.style.display = 'none'; },
-            setUrl: (url) => {
-                urlInput.value = url;
-                ball.classList.add('has-url');
-            },
-            getConcurrency: () => selThreads,
-            getUrl: () => urlInput.value.trim()
-        };
+        return { ball, panel, showBall: () => { ball.style.display = 'flex'; }, hideBall: () => { ball.style.display = 'none'; }, setUrl: (url) => { urlInput.value = url; ball.classList.add('has-url'); }, getConcurrency: () => selThreads, getUrl: () => urlInput.value.trim() };
     }
 
-    // ========== 网络监听 & 视频播放监听 ==========
     function monitorVideoPlay(ui) {
-        document.querySelectorAll('video').forEach(v => {
-            v.addEventListener('play', () => {
-                const u = sniffM3u8();
-                if (u) { ui.setUrl(u); ui.showBall(); }
-            }, { once: true });
-        });
-
-        const observer = new MutationObserver(mutations => {
-            mutations.forEach(m => {
-                m.addedNodes.forEach(node => {
-                    if (node.nodeName === 'VIDEO') {
-                        node.addEventListener('play', () => {
-                            const u = sniffM3u8();
-                            if (u) { ui.setUrl(u); ui.showBall(); }
-                        }, { once: true });
-                    } else if (node.querySelectorAll) {
-                        node.querySelectorAll('video').forEach(v => {
-                            v.addEventListener('play', () => {
-                                const u = sniffM3u8();
-                                if (u) { ui.setUrl(u); ui.showBall(); }
-                            }, { once: true });
-                        });
-                    }
-                });
-            });
-        });
+        document.querySelectorAll('video').forEach(v => v.addEventListener('play', () => { const u = sniffM3u8(); if (u) { ui.setUrl(u); ui.showBall(); } }, { once: true }));
+        const observer = new MutationObserver(muts => { muts.forEach(m => { m.addedNodes.forEach(n => { if (n.nodeName === 'VIDEO') n.addEventListener('play', () => { const u = sniffM3u8(); if (u) { ui.setUrl(u); ui.showBall(); } }, { once: true }); else if (n.querySelectorAll) n.querySelectorAll('video').forEach(v => v.addEventListener('play', () => { const u = sniffM3u8(); if (u) { ui.setUrl(u); ui.showBall(); } }, { once: true })); }); }); });
         observer.observe(document.body, { childList: true, subtree: true });
     }
 
-    // ========== 初始化 ==========
     function init() {
         const ui = createUI();
-
-        // 初始嗅探
-        const sniffed = sniffM3u8();
-        if (sniffed) { ui.setUrl(sniffed); ui.showBall(); }
-
-        // 监听视频播放
+        const sniffed = sniffM3u8(); if (sniffed) { ui.setUrl(sniffed); ui.showBall(); }
         monitorVideoPlay(ui);
+        const origFetch = window.fetch; window.fetch = async function(...args) { const resp = await origFetch.apply(this, args); try { const u = typeof args[0] === 'string' ? args[0] : args[0]?.url; if (u?.includes('.m3u8')) { ui.setUrl(u); ui.showBall(); } } catch(_) {} return resp; };
+        const origOpen = XMLHttpRequest.prototype.open; XMLHttpRequest.prototype.open = function(method, url) { if (url?.includes('.m3u8')) { ui.setUrl(url); ui.showBall(); } return origOpen.apply(this, arguments); };
 
-        // 拦截 fetch / XHR
-        const origFetch = window.fetch;
-        window.fetch = async function(...args) {
-            const resp = await origFetch.apply(this, args);
-            try {
-                const u = typeof args[0] === 'string' ? args[0] : args[0]?.url;
-                if (u?.includes('.m3u8')) { ui.setUrl(u); ui.showBall(); }
-            } catch (_) {}
-            return resp;
-        };
-        const origOpen = XMLHttpRequest.prototype.open;
-        XMLHttpRequest.prototype.open = function(method, url) {
-            if (url?.includes('.m3u8')) { ui.setUrl(url); ui.showBall(); }
-            return origOpen.apply(this, arguments);
-        };
-
-        // 下载按钮
-        const downloadBtn = ui.panel.querySelector('#download-btn');
-        downloadBtn.addEventListener('click', () => {
+        ui.panel.querySelector('#download-btn').addEventListener('click', () => {
             const url = ui.getUrl();
-            if (!url) {
-                ui.panel.querySelector('#status-text').textContent = '请输入 m3u8 链接';
+            if (!url) { ui.panel.querySelector('#status-text').textContent = '请输入链接'; return; }
+            if (currentDownload && currentDownload.paused) {
+                ui.panel.querySelector('#status-text').textContent = '已有暂停的下载任务，请先继续';
                 return;
             }
-            if (currentDownload && !currentDownload.paused) {
-                ui.panel.querySelector('#status-text').textContent = '已有下载任务，请先暂停';
-                return;
-            }
+            if (currentDownload) currentDownload.cleanup();
             currentDownload = new DownloadController(ui, url, ui.getConcurrency());
             currentDownload.run();
         });
 
-        // 手动清理按钮
-        const cleanupBtn = ui.panel.querySelector('#cleanup-btn');
-        cleanupBtn.addEventListener('click', () => {
+        ui.panel.querySelector('#cleanup-btn').addEventListener('click', () => {
             if (currentDownload) {
                 currentDownload.manualCleanup();
+                currentDownload = null; // 清理后释放引用
             } else {
-                ui.panel.querySelector('#status-text').textContent = '没有可清理的下载任务';
+                ui.panel.querySelector('#status-text').textContent = '没有要清理的下载任务';
             }
         });
     }
 
-    if (document.readyState === 'loading') {
-        document.addEventListener('DOMContentLoaded', init);
-    } else {
-        init();
-    }
+    if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', init);
+    else init();
 })();
