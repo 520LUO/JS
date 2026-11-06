@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         M3U8媒体下载器 (支持AES-128解密)
 // @namespace    https://github.com/520luo/js/m3u8-downloader
-// @version      26.11.06.1
+// @version      26.11.06.2
 // @description  智能嗅探链接,多线程下载,智能模式,大文件边下边存,小文件内存高速下载,支持解密AES-128,精美的UI
 // @icon         https://raw.githubusercontent.com/520LUO/icons/refs/heads/main/M3U8.png
 // @author       520LUO
@@ -537,8 +537,10 @@
     }
 
     // 把选择器错误归类：用户取消 / 跨域 iframe / 需要重新点击 抛出；其余错误只记录，让调用方尝试下一种方式
+    let lastPickError = '';
     function handlePickError(err) {
         const name = err && err.name, msg = err && err.message;
+        lastPickError = `${name || 'Error'}${msg ? ': ' + msg : ''}`;
         if (name === 'AbortError') throw new Error('用户取消');
         if (name === 'SecurityError') {
             if (window.self !== window.top) throw new Error('CrossOriginIframe');
@@ -627,16 +629,22 @@
                     else if (useDisk) {
                         try {
                             let target;
-                            try {
-                                if (!userGestureActive()) throw new Error('NeedGesture');
-                                target = await pickSaveTarget(this.currentFilename);
-                            } catch (err) {
-                                if (err.message !== 'NeedGesture') throw err;
-                                // 拉取 M3U8 期间授权已过期：让用户再点一次，立即弹出选择器
-                                await waitForUserClick(this.ui, '💾 请点击按钮选择保存位置', '选择保存位置');
-                                target = await pickSaveTarget(this.currentFilename);
+                            for (let attempt = 0; ; attempt++) {
+                                try {
+                                    if (!userGestureActive()) throw new Error('NeedGesture');
+                                    target = await pickSaveTarget(this.currentFilename);
+                                    break;
+                                } catch (err) {
+                                    if (err.message !== 'NeedGesture' || attempt >= 1) throw err;
+                                    // 拉取 M3U8 期间授权已过期：让用户再点一次，立即弹出选择器
+                                    await waitForUserClick(this.ui, '💾 请点击按钮选择保存位置', '选择保存位置');
+                                }
                             }
-                            if (!target) { useDisk = false; status.textContent = '⚠️ 无法选择保存位置，已自动切换为内存下载'; }
+                            if (!target) {
+                                useDisk = false;
+                                status.textContent = `⚠️ 无法选择保存位置${lastPickError ? '（' + lastPickError + '）' : ''}，已切换为内存下载` +
+                                    (this.estimatedSize > SIZE_THRESHOLD ? '；文件较大，内存可能不足' : '');
+                            }
                             else if (target.kind === 'file') { this.fileHandle = target.handle; this.dirHandle = null; }
                             else { this.dirHandle = target.handle; this.fileHandle = null; }
                         } catch (err) {
@@ -658,10 +666,13 @@
                 else await this._memoryModeRun();
             } catch (err) {
                 if (['encrypted','unsupported-encryption','用户取消'].includes(err.message)) {
+                    if (err.message === '用户取消') { status.textContent = '⚠️ 已取消选择保存位置'; status.classList.add('error-text'); }
                     ball.classList.add('error'); dBtn.disabled = false; pBtn.disabled = true;
                     return;
                 }
-                status.textContent = '❌ ' + err.message;
+                // 磁盘模式出错：丢弃未完成的写入流，避免留下被占用的半截文件句柄
+                if (this.writable) { const w = this.writable; this.writable = null; try { Promise.resolve(w.abort()).catch(() => {}); } catch (_) {} }
+                status.textContent = '❌ ' + (err.name && err.name !== 'Error' ? err.name + ': ' : '') + err.message;
                 status.classList.add('error-text'); dBtn.disabled = false; pBtn.disabled = true; ball.classList.add('error');
             }
         }
@@ -710,16 +721,26 @@
                 const seg = this.segments[i];
                 let success = false;
                 while (!success && !this.paused) {
+                    let blob;
                     try {
-                        const blob = await downloadAndDecrypt(seg.url, this.url, this.abortController.signal, seg.key, this.keyCache, i, 9999);
-                        if (this.paused) return;
-                        await this.writable.write(blob);
-                        this.bytes += blob.size; this.completed++; updateProgress();
-                        success = true;
+                        blob = await downloadAndDecrypt(seg.url, this.url, this.abortController.signal, seg.key, this.keyCache, i, MAX_RETRIES);
                     } catch (err) {
                         if (err.message === 'aborted') return;
                         status.textContent = `🔄 片段 ${i+1} 重试中...`;
+                        await new Promise(r => setTimeout(r, 1000));
+                        continue;
                     }
+                    if (this.paused) return;
+                    try {
+                        await this.writable.write(blob);
+                    } catch (err) {
+                        // 写入失败（权限 / 空间 / 句柄失效）重新下载没有意义，直接报出真实原因
+                        const e = new Error(`写入文件失败（片段 ${i+1}/${this.total}）：${err && err.message || err}`);
+                        e.name = (err && err.name) || 'WriteError';
+                        throw e;
+                    }
+                    this.bytes += blob.size; this.completed++; updateProgress();
+                    success = true;
                 }
             }
 
