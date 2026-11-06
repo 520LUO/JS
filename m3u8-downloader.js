@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         M3U8媒体下载器 (支持AES-128解密)
 // @namespace    https://github.com/520luo/js/m3u8-downloader
-// @version      26.11.06.2
+// @version      26.11.06.3
 // @description  智能嗅探链接,多线程下载,智能模式,大文件边下边存,小文件内存高速下载,支持解密AES-128,精美的UI
 // @icon         https://raw.githubusercontent.com/520LUO/icons/refs/heads/main/M3U8.png
 // @author       520LUO
@@ -538,10 +538,18 @@
 
     // 把选择器错误归类：用户取消 / 跨域 iframe / 需要重新点击 抛出；其余错误只记录，让调用方尝试下一种方式
     let lastPickError = '';
-    function handlePickError(err) {
+    function handlePickError(err, elapsed) {
         const name = err && err.name, msg = err && err.message;
         lastPickError = `${name || 'Error'}${msg ? ': ' + msg : ''}`;
-        if (name === 'AbortError') throw new Error('用户取消');
+        if (name === 'AbortError') {
+            // 几百毫秒内就 Abort：用户来不及操作，说明浏览器根本没弹出选择器（不支持 / 被拦截），不算“用户取消”
+            if (elapsed !== undefined && elapsed < 800) {
+                lastPickError = `选择器未弹出(${Math.round(elapsed)}ms 即返回 AbortError)`;
+                console.warn('[M3U8] 保存选择器立即返回 AbortError，视为不可用');
+                return;
+            }
+            throw new Error('用户取消');
+        }
         if (name === 'SecurityError') {
             if (window.self !== window.top) throw new Error('CrossOriginIframe');
             throw new Error('NeedGesture');
@@ -551,17 +559,19 @@
 
     async function pickSaveTarget(filename) {
         if (hasSavePicker()) {
+            const t0 = performance.now();
             try {
                 const handle = await window.showSaveFilePicker({
                     suggestedName: filename,
                     types: [{ description: 'MP4 视频', accept: { 'video/mp4': ['.mp4'] } }]
                 });
                 return { kind: 'file', handle };
-            } catch (err) { handlePickError(err); }
+            } catch (err) { handlePickError(err, performance.now() - t0); }
         }
         if (hasDirPicker()) {
+            const t1 = performance.now();
             try { return { kind: 'dir', handle: await getDirectoryHandle() }; }
-            catch (err) { handlePickError(err); }
+            catch (err) { handlePickError(err, performance.now() - t1); }
         }
         return null;
     }
