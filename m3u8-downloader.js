@@ -33,9 +33,8 @@
     let savedDirHandle = null;
     let currentDownload = null;
 
-    // 嗅探默认关闭；临时停用仅在当前页面生命周期内生效，刷新后自动恢复
+    // 自动嗅探默认关闭
     let sniffEnabled = false;
-    let sniffTemporarilyPaused = false;
     const filenameCounts = new Map();
     let menuCommandIds = [];
 
@@ -195,7 +194,7 @@
     }
 
     function isSniffingActive() {
-        return sniffEnabled && !sniffTemporarilyPaused;
+        return sniffEnabled;
     }
 
     function registerMenuCommands() {
@@ -206,30 +205,22 @@
             }
         }
         menuCommandIds = [];
-        const add = (label, callback) => {
-            try {
-                const id = GM_registerMenuCommand(label, callback);
-                if (id !== undefined) menuCommandIds.push(id);
-            } catch (_) {}
-        };
-
-        add(`${sniffEnabled ? '☑' : '☐'} 嗅探音频（${sniffEnabled ? '已开启' : '已关闭'}）`, () => {
-            sniffEnabled = !sniffEnabled;
-            registerMenuCommands();
-            showToast(`嗅探音频已${sniffEnabled ? '开启' : '关闭'}`);
-            if (isSniffingActive()) {
-                const url = sniffM3u8();
-                if (url && uiInstance) {
-                    uiInstance.setUrl(url);
-                    uiInstance.showBall();
+        try {
+            const label = sniffEnabled ? '✅ 自动嗅探-ON' : '🚫 自动嗅探-OFF';
+            const id = GM_registerMenuCommand(label, () => {
+                sniffEnabled = !sniffEnabled;
+                registerMenuCommands();
+                showToast(sniffEnabled ? '自动嗅探已开启' : '自动嗅探已关闭');
+                if (isSniffingActive()) {
+                    const url = sniffM3u8();
+                    if (url && uiInstance) {
+                        uiInstance.setUrl(url);
+                        uiInstance.showBall();
+                    }
                 }
-            }
-        });
-        add(`${sniffTemporarilyPaused ? '▶' : '⏸'} 临时停用嗅探（${sniffTemporarilyPaused ? '已停用' : '当前可用'}）`, () => {
-            sniffTemporarilyPaused = !sniffTemporarilyPaused;
-            registerMenuCommands();
-            showToast(sniffTemporarilyPaused ? '已临时停用嗅探，刷新页面后恢复' : '已恢复嗅探');
-        });
+            });
+            if (id !== undefined) menuCommandIds.push(id);
+        } catch (_) {}
     }
 
     let uiInstance = null;
