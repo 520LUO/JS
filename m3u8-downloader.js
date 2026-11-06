@@ -9,11 +9,13 @@
 // @grant        GM_xmlhttpRequest
 // @grant        GM_notification
 // @grant        GM_setClipboard
+// @grant        GM_registerMenuCommand
+// @grant        GM_unregisterMenuCommand
 // @connect      *
 // @run-at       document-idle
 // @license      MIT
-// @downloadURL https://update.greasyfork.org/scripts/584352/M3U8%E5%AA%92%E4%BD%93%E4%B8%8B%E8%BD%BD%E5%99%A8.user.js
-// @updateURL https://update.greasyfork.org/scripts/584352/M3U8%E5%AA%92%E4%BD%93%E4%B8%8B%E8%BD%BD%E5%99%A8.meta.js
+// @downloadURL https://update.greasyfork.org/scripts/584352/M3U8%E5%AA%92%E4%BD%93%E4%B8%8B%E8%BD%BD%E5%99%A8%20%28%E6%94%AF%E6%8C%81AES-128%E8%A7%A3%E5%AF%86%29.user.js
+// @updateURL https://update.greasyfork.org/scripts/584352/M3U8%E5%AA%92%E4%BD%93%E4%B8%8B%E8%BD%BD%E5%99%A8%20%28%E6%94%AF%E6%8C%81AES-128%E8%A7%A3%E5%AF%86%29.meta.js
 // ==/UserScript==
 
 (function() {
@@ -30,6 +32,12 @@
 
     let savedDirHandle = null;
     let currentDownload = null;
+
+    // 嗅探默认关闭；临时停用仅在当前页面生命周期内生效，刷新后自动恢复
+    let sniffEnabled = false;
+    let sniffTemporarilyPaused = false;
+    const filenameCounts = new Map();
+    let menuCommandIds = [];
 
     // ========== UI 样式 ==========
     const CSS = `
@@ -154,6 +162,108 @@
     const style = document.createElement('style');
     style.textContent = CSS;
     document.head.appendChild(style);
+
+    // ========== 油猴菜单与提示 ==========
+    function showToast(message) {
+        let toast = document.getElementById('m3u8-userscript-toast');
+        if (!toast) {
+            toast = document.createElement('div');
+            toast.id = 'm3u8-userscript-toast';
+            Object.assign(toast.style, {
+                position: 'fixed', left: '50%', bottom: '24px',
+                transform: 'translate(-50%, 12px)', opacity: '0',
+                zIndex: '2147483647', padding: '10px 16px',
+                borderRadius: '12px', color: '#fff',
+                background: 'rgba(25,25,30,.88)',
+                border: '1px solid rgba(255,255,255,.18)',
+                boxShadow: '0 6px 24px rgba(0,0,0,.28)',
+                backdropFilter: 'blur(14px)', WebkitBackdropFilter: 'blur(14px)',
+                font: '13px/1.4 system-ui,sans-serif',
+                pointerEvents: 'none', transition: 'opacity .2s, transform .2s',
+                maxWidth: 'min(86vw, 420px)', textAlign: 'center'
+            });
+            document.documentElement.appendChild(toast);
+        }
+        toast.textContent = message;
+        toast.style.opacity = '1';
+        toast.style.transform = 'translate(-50%, 0)';
+        clearTimeout(toast._hideTimer);
+        toast._hideTimer = setTimeout(() => {
+            toast.style.opacity = '0';
+            toast.style.transform = 'translate(-50%, 12px)';
+        }, 1900);
+    }
+
+    function isSniffingActive() {
+        return sniffEnabled && !sniffTemporarilyPaused;
+    }
+
+    function registerMenuCommands() {
+        if (typeof GM_registerMenuCommand !== 'function') return;
+        if (typeof GM_unregisterMenuCommand === 'function') {
+            for (const id of menuCommandIds) {
+                try { GM_unregisterMenuCommand(id); } catch (_) {}
+            }
+        }
+        menuCommandIds = [];
+        const add = (label, callback) => {
+            try {
+                const id = GM_registerMenuCommand(label, callback);
+                if (id !== undefined) menuCommandIds.push(id);
+            } catch (_) {}
+        };
+
+        add(`${sniffEnabled ? '☑' : '☐'} 嗅探音频（${sniffEnabled ? '已开启' : '已关闭'}）`, () => {
+            sniffEnabled = !sniffEnabled;
+            registerMenuCommands();
+            showToast(`嗅探音频已${sniffEnabled ? '开启' : '关闭'}`);
+            if (isSniffingActive()) {
+                const url = sniffM3u8();
+                if (url && uiInstance) {
+                    uiInstance.setUrl(url);
+                    uiInstance.showBall();
+                }
+            }
+        });
+        add(`${sniffTemporarilyPaused ? '▶' : '⏸'} 临时停用嗅探（${sniffTemporarilyPaused ? '已停用' : '当前可用'}）`, () => {
+            sniffTemporarilyPaused = !sniffTemporarilyPaused;
+            registerMenuCommands();
+            showToast(sniffTemporarilyPaused ? '已临时停用嗅探，刷新页面后恢复' : '已恢复嗅探');
+        });
+    }
+
+    let uiInstance = null;
+
+    // ========== 下载文件命名 ==========
+    function getVideoTitle() {
+        const videos = [...document.querySelectorAll('video')];
+        const activeVideo = videos.find(v => !v.paused && (v.currentSrc || v.src)) || videos.find(v => v.currentSrc || v.src);
+        const candidates = [
+            activeVideo?.getAttribute('title'),
+            activeVideo?.getAttribute('aria-label'),
+            activeVideo?.closest('[class*="player"],[class*="video"],[id*="player"],[id*="video"]')
+                ?.querySelector('[class*="title"],[class*="name"],h1,h2')?.textContent,
+            document.querySelector('meta[property="og:title"]')?.content,
+            document.querySelector('meta[name="twitter:title"]')?.content,
+            document.querySelector('h1')?.textContent,
+            document.title
+        ];
+        const title = candidates.map(v => (v || '').replace(/\s+/g, ' ').trim())
+            .find(v => v && !/^(视频播放|在线播放|播放器|player)$/i.test(v));
+        return sanitizeFilename(title || 'video');
+    }
+
+    function sanitizeFilename(name) {
+        return String(name).replace(/[\\\\/:*?"<>|\\u0000-\\u001f]/g, '_')
+            .replace(/[.\\s]+$/g, '').replace(/^\\s+/g, '').slice(0, 120) || 'video';
+    }
+
+    function createDownloadFilename() {
+        const base = getVideoTitle();
+        const count = (filenameCounts.get(base) || 0) + 1;
+        filenameCounts.set(base, count);
+        return `${base}${count > 1 ? `_${count}` : ''}.mp4`;
+    }
 
     // ========== SVG 图标 ==========
     const ICONS = {
@@ -351,7 +461,7 @@
             this.completed = 0; this.total = 0; this.bytes = 0; this.startTime = 0;
             this.mode = 'memory'; this.writable = null; this.dirHandle = null;
             this.segmentBlobs = []; this.mapBlob = null;
-            this.currentFilename = ''; this.previousFilename = '';
+            this.currentFilename = createDownloadFilename(); this.previousFilename = '';
             this.segments = []; this.mapUri = null; this.keyCache = new Map();
         }
 
@@ -419,7 +529,6 @@
             const cBtn = panel.querySelector('#cleanup-btn');
 
             if (!this.dirHandle) throw new Error('目录句柄不可用');
-            this.currentFilename = `video_${Date.now()}.mp4`;
             const fh = await this.dirHandle.getFileHandle(this.currentFilename, { create: true });
             this.writable = await fh.createWritable();
 
@@ -554,7 +663,7 @@
                 const blobs = this.mapBlob ? [this.mapBlob, ...this.segmentBlobs] : this.segmentBlobs;
                 const finalBlob = new Blob(blobs, { type: 'video/mp4' });
                 const blobUrl = URL.createObjectURL(finalBlob);
-                const a = document.createElement('a'); a.href = blobUrl; a.download = `video_${Date.now()}.mp4`;
+                const a = document.createElement('a'); a.href = blobUrl; a.download = this.currentFilename;
                 document.body.appendChild(a); a.click(); a.remove(); URL.revokeObjectURL(blobUrl);
                 status.textContent = `✅ 完成 (${fileSizeMB}MB)`;
                 if (typeof GM_notification !== 'undefined') GM_notification({ title: '下载完成', text: `${fileSizeMB}MB`, timeout: 5000 });
@@ -673,17 +782,31 @@
     }
 
     function monitorVideoPlay(ui) {
-        document.querySelectorAll('video').forEach(v => v.addEventListener('play', () => { const u = sniffM3u8(); if (u) { ui.setUrl(u); ui.showBall(); } }, { once: true }));
-        const observer = new MutationObserver(muts => { muts.forEach(m => { m.addedNodes.forEach(n => { if (n.nodeName === 'VIDEO') n.addEventListener('play', () => { const u = sniffM3u8(); if (u) { ui.setUrl(u); ui.showBall(); } }, { once: true }); else if (n.querySelectorAll) n.querySelectorAll('video').forEach(v => v.addEventListener('play', () => { const u = sniffM3u8(); if (u) { ui.setUrl(u); ui.showBall(); } }, { once: true })); }); }); });
+        document.querySelectorAll('video').forEach(v => v.addEventListener('play', () => { if (!isSniffingActive()) return; const u = sniffM3u8(); if (u) { ui.setUrl(u); ui.showBall(); } }));
+        const observer = new MutationObserver(muts => { muts.forEach(m => { m.addedNodes.forEach(n => { if (n.nodeName === 'VIDEO') n.addEventListener('play', () => { if (!isSniffingActive()) return; const u = sniffM3u8(); if (u) { ui.setUrl(u); ui.showBall(); } }); else if (n.querySelectorAll) n.querySelectorAll('video').forEach(v => v.addEventListener('play', () => { if (!isSniffingActive()) return; const u = sniffM3u8(); if (u) { ui.setUrl(u); ui.showBall(); } })); }); }); });
         observer.observe(document.body, { childList: true, subtree: true });
     }
 
     function init() {
         const ui = createUI();
-        const sniffed = sniffM3u8(); if (sniffed) { ui.setUrl(sniffed); ui.showBall(); }
+        uiInstance = ui;
+        registerMenuCommands();
+        // 默认关闭自动嗅探；用户可通过油猴菜单开启
         monitorVideoPlay(ui);
-        const origFetch = window.fetch; window.fetch = async function(...args) { const resp = await origFetch.apply(this, args); try { const u = typeof args[0] === 'string' ? args[0] : args[0]?.url; if (u?.includes('.m3u8')) { ui.setUrl(u); ui.showBall(); } } catch(_) {} return resp; };
-        const origOpen = XMLHttpRequest.prototype.open; XMLHttpRequest.prototype.open = function(method, url) { if (url?.includes('.m3u8')) { ui.setUrl(url); ui.showBall(); } return origOpen.apply(this, arguments); };
+        const origFetch = window.fetch;
+        window.fetch = async function(...args) {
+            const resp = await origFetch.apply(this, args);
+            try {
+                const u = typeof args[0] === 'string' ? args[0] : args[0]?.url;
+                if (isSniffingActive() && u?.includes('.m3u8')) { ui.setUrl(u); ui.showBall(); }
+            } catch(_) {}
+            return resp;
+        };
+        const origOpen = XMLHttpRequest.prototype.open;
+        XMLHttpRequest.prototype.open = function(method, url) {
+            if (isSniffingActive() && url?.includes('.m3u8')) { ui.setUrl(url); ui.showBall(); }
+            return origOpen.apply(this, arguments);
+        };
 
         ui.panel.querySelector('#download-btn').addEventListener('click', () => {
             const url = ui.getUrl();
