@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         M3U8媒体下载器 (支持AES-128解密)
 // @namespace    https://github.com/520luo/js/m3u8-downloader
-// @version      26.11.06.3
+// @version      26.11.06.4
 // @description  智能嗅探链接,多线程下载,智能模式,大文件边下边存,小文件内存高速下载,支持解密AES-128,精美的UI
 // @icon         https://raw.githubusercontent.com/520LUO/icons/refs/heads/main/M3U8.png
 // @author       520LUO
@@ -573,6 +573,15 @@
             try { return { kind: 'dir', handle: await getDirectoryHandle() }; }
             catch (err) { handlePickError(err, performance.now() - t1); }
         }
+        // WebView 的选择器不可用时：用 Mafari 的原生流式写入（Download/mafari，逐段落盘不占内存）
+        if (typeof GM !== 'undefined' && GM && typeof GM.openFileStream === 'function') {
+            try {
+                const stream = await GM.openFileStream(filename, 'video/mp4');
+                return { kind: 'native', stream };
+            } catch (err) {
+                lastPickError += (lastPickError ? '；' : '') + '原生写入失败: ' + (err && err.message || err);
+            }
+        }
         return null;
     }
 
@@ -596,7 +605,7 @@
             this.ui = ui; this.url = url; this.concurrency = concurrency;
             this.abortController = null; this.paused = false;
             this.completed = 0; this.total = 0; this.bytes = 0; this.startTime = 0;
-            this.mode = 'memory'; this.writable = null; this.dirHandle = null; this.fileHandle = null; this.startBytes = 0;
+            this.mode = 'memory'; this.nativeStream = null; this.writable = null; this.dirHandle = null; this.fileHandle = null; this.startBytes = 0;
             this.segmentBlobs = []; this.mapBlob = null;
             this.currentFilename = createDownloadFilename(); this.previousFilename = '';
             this.segments = []; this.mapUri = null; this.keyCache = new Map();
@@ -655,6 +664,7 @@
                                 status.textContent = `⚠️ 无法选择保存位置${lastPickError ? '（' + lastPickError + '）' : ''}，已切换为内存下载` +
                                     (this.estimatedSize > SIZE_THRESHOLD ? '；文件较大，内存可能不足' : '');
                             }
+                            else if (target.kind === 'native') { this.nativeStream = target.stream; this.fileHandle = null; this.dirHandle = null; }
                             else if (target.kind === 'file') { this.fileHandle = target.handle; this.dirHandle = null; }
                             else { this.dirHandle = target.handle; this.fileHandle = null; }
                         } catch (err) {
@@ -696,12 +706,16 @@
 
             if (!this.writable) {
                 // 首次：创建文件并打开写入流（单文件模式用选择器返回的句柄，目录模式在目录里新建）
-                let fh = this.fileHandle;
-                if (!fh) {
-                    if (!this.dirHandle) throw new Error('保存位置不可用');
-                    fh = await this.dirHandle.getFileHandle(this.currentFilename, { create: true });
+                if (this.nativeStream) {
+                    this.writable = this.nativeStream;
+                } else {
+                    let fh = this.fileHandle;
+                    if (!fh) {
+                        if (!this.dirHandle) throw new Error('保存位置不可用');
+                        fh = await this.dirHandle.getFileHandle(this.currentFilename, { create: true });
+                    }
+                    this.writable = await fh.createWritable();
                 }
-                this.writable = await fh.createWritable();
                 this.completed = 0; this.bytes = 0;
                 if (this.mapBlob) { await this.writable.write(this.mapBlob); this.bytes = this.mapBlob.size; }
             }
@@ -769,7 +783,8 @@
             ball.classList.add('done'); dBtn.disabled = false; pBtn.disabled = true;
             dBtn.classList.remove('retry'); dBtn.innerHTML = ICONS.download;
             cBtn.style.display = 'flex';
-            status.textContent = `✅ 完成：${(this.fileHandle && this.fileHandle.name) || this.currentFilename} (${fileSizeMB}MB)`;
+            status.textContent = `✅ 完成：${(this.nativeStream && this.nativeStream.name) || (this.fileHandle && this.fileHandle.name) || this.currentFilename} (${fileSizeMB}MB)` +
+                (this.nativeStream ? '，已保存到 Download/mafari' : '');
             if (typeof GM_notification !== 'undefined') GM_notification({ title: '下载完成', text: `${fileSizeMB}MB`, timeout: 5000 });
         }
 
