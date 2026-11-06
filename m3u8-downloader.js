@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         M3U8媒体下载器 (支持AES-128解密)
 // @namespace    https://github.com/520luo/js/m3u8-downloader
-// @version      26.07.02
+// @version      26.11.06
 // @description  智能嗅探链接,多线程下载,智能模式,大文件边下边存,小文件内存高速下载,支持解密AES-128,精美的UI
 // @icon         https://raw.githubusercontent.com/520LUO/icons/refs/heads/main/M3U8.png
 // @author       520LUO
@@ -241,27 +241,99 @@
     let uiInstance = null;
 
     // ========== 下载文件命名 ==========
+    function getPlayerInternalTitle(video) {
+        // 先从当前视频所属播放器容器中查找标题，避免误取页面其他区域的标题。
+        const containerSelector = [
+            '[class*="player"]', '[id*="player"]',
+            '[class*="video-container"]', '[class*="video-player"]',
+            '[id*="video-container"]', '[id*="video-player"]'
+        ].join(',');
+
+        let containers = [];
+        if (video) {
+            let node = video.parentElement;
+            for (let depth = 0; node && depth < 6; depth++, node = node.parentElement) {
+                if (node.matches?.(containerSelector)) containers.push(node);
+            }
+            const closest = video.closest?.(containerSelector);
+            if (closest && !containers.includes(closest)) containers.unshift(closest);
+        }
+
+        // 常见播放器标题节点；同时兼容 title / aria-label / data-title 属性。
+        const titleSelectors = [
+            '[class*="video-title"]', '[class*="player-title"]',
+            '[class*="title"]', '[id*="video-title"]', '[id*="player-title"]',
+            '[data-title]', '[aria-label][class*="title"]',
+            '.title', '.videoName', '.video-name', '.name',
+            'h1', 'h2'
+        ];
+
+        for (const container of containers) {
+            for (const selector of titleSelectors) {
+                let nodes = [];
+                try { nodes = container.querySelectorAll(selector); } catch (_) {}
+                for (const node of nodes) {
+                    const value = node.getAttribute('data-title')
+                        || node.getAttribute('title')
+                        || node.getAttribute('aria-label')
+                        || node.textContent;
+                    const title = normalizeTitleCandidate(value);
+                    if (title) return title;
+                }
+            }
+        }
+        return '';
+    }
+
+    function normalizeTitleCandidate(value) {
+        const title = String(value || '').replace(/\s+/g, ' ').trim();
+        if (!title || /^(视频播放|在线播放|播放器|player|video)$/i.test(title)) return '';
+        // 避免把整段播放器说明或导航文本当成文件名。
+        if (title.length > 300) return '';
+        return title;
+    }
+
     function getVideoTitle() {
         const videos = [...document.querySelectorAll('video')];
-        const activeVideo = videos.find(v => !v.paused && (v.currentSrc || v.src)) || videos.find(v => v.currentSrc || v.src);
+        const activeVideo = videos.find(v => !v.paused && (v.currentSrc || v.src))
+            || videos.find(v => v.currentSrc || v.src)
+            || videos[0]
+            || null;
+
+        // 严格按用户指定的优先级逐级回退。
         const candidates = [
-            activeVideo?.getAttribute('title'),
+            activeVideo?.getAttribute('title') || activeVideo?.title,
             activeVideo?.getAttribute('aria-label'),
-            activeVideo?.closest('[class*="player"],[class*="video"],[id*="player"],[id*="video"]')
-                ?.querySelector('[class*="title"],[class*="name"],h1,h2')?.textContent,
-            document.querySelector('meta[property="og:title"]')?.content,
-            document.querySelector('meta[name="twitter:title"]')?.content,
+            getPlayerInternalTitle(activeVideo),
+            document.querySelector('meta[property="og:title"]')?.getAttribute('content'),
+            document.querySelector('meta[name="twitter:title"]')?.getAttribute('content'),
             document.querySelector('h1')?.textContent,
             document.title
         ];
-        const title = candidates.map(v => (v || '').replace(/\s+/g, ' ').trim())
-            .find(v => v && !/^(视频播放|在线播放|播放器|player)$/i.test(v));
-        return sanitizeFilename(title || 'video');
+
+        for (const candidate of candidates) {
+            const normalized = normalizeTitleCandidate(candidate);
+            if (normalized) return sanitizeFilename(normalized);
+        }
+        return 'video';
     }
 
     function sanitizeFilename(name) {
-        return String(name).replace(/[\\\\/:*?"<>|\\u0000-\\u001f]/g, '_')
-            .replace(/[.\\s]+$/g, '').replace(/^\\s+/g, '').slice(0, 120) || 'video';
+        let safe = String(name || '')
+            // Windows / Android / 常见文件系统不允许的字符及控制字符。
+            .replace(/[\\/:*?"<>|\u0000-\u001F\u007F]/g, '_')
+            .replace(/[\u202A-\u202E\u2066-\u2069]/g, '')
+            .replace(/\s+/g, ' ')
+            .replace(/[. ]+$/g, '')
+            .trim();
+
+        // 文件名不能是空字符串、. 或 ..，并避开 Windows 保留设备名。
+        if (!safe || /^\.+$/.test(safe)) safe = 'video';
+        if (/^(CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])(?:\..*)?$/i.test(safe)) safe = `_${safe}`;
+
+        // 控制文件名长度，避免极长标题导致文件系统拒绝创建。
+        safe = Array.from(safe).slice(0, 120).join('').replace(/[. ]+$/g, '');
+        return safe || 'video';
     }
 
     function createDownloadFilename() {
