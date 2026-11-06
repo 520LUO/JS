@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         M3U8媒体下载器 (支持AES-128解密)
 // @namespace    https://github.com/520luo/js/m3u8-downloader
-// @version      26.11.06
+// @version      26.11.06.1
 // @description  智能嗅探链接,多线程下载,智能模式,大文件边下边存,小文件内存高速下载,支持解密AES-128,精美的UI
 // @icon         https://raw.githubusercontent.com/520LUO/icons/refs/heads/main/M3U8.png
 // @author       520LUO
@@ -521,14 +521,61 @@
             if (state === 'prompt') { const ns = await savedDirHandle.requestPermission({ mode: 'readwrite' }); if (ns === 'granted') return savedDirHandle; }
             savedDirHandle = null;
         }
-        try {
-            savedDirHandle = await window.showDirectoryPicker({ mode: 'readwrite', startIn: 'downloads' });
-            return savedDirHandle;
-        } catch (err) {
-            if (err.name === 'AbortError') throw new Error('用户取消');
-            if (err.name === 'SecurityError' && window.self !== window.top) throw new Error('CrossOriginIframe');
-            throw err;
+        savedDirHandle = await window.showDirectoryPicker({ mode: 'readwrite', startIn: 'downloads' });
+        return savedDirHandle;
+    }
+
+    // ========== 保存位置选择（边下边存） ==========
+    // 优先 showSaveFilePicker（单文件，桌面 Chrome/Edge 86+、Android WebView 132+），
+    // 其次 showDirectoryPicker（仅桌面），都不可用或失败时由调用方回退到内存下载。
+    const hasSavePicker = () => typeof window.showSaveFilePicker === 'function';
+    const hasDirPicker = () => typeof window.showDirectoryPicker === 'function';
+
+    // 文件选择器要求“用户刚刚操作过”；浏览器不提供该接口时按“有”处理，交给 SecurityError 兜底
+    function userGestureActive() {
+        try { return !navigator.userActivation || navigator.userActivation.isActive; } catch (_) { return true; }
+    }
+
+    // 把选择器错误归类：用户取消 / 跨域 iframe / 需要重新点击 抛出；其余错误只记录，让调用方尝试下一种方式
+    function handlePickError(err) {
+        const name = err && err.name, msg = err && err.message;
+        if (name === 'AbortError') throw new Error('用户取消');
+        if (name === 'SecurityError') {
+            if (window.self !== window.top) throw new Error('CrossOriginIframe');
+            throw new Error('NeedGesture');
         }
+        console.warn('[M3U8] 选择保存位置失败:', name, msg);
+    }
+
+    async function pickSaveTarget(filename) {
+        if (hasSavePicker()) {
+            try {
+                const handle = await window.showSaveFilePicker({
+                    suggestedName: filename,
+                    types: [{ description: 'MP4 视频', accept: { 'video/mp4': ['.mp4'] } }]
+                });
+                return { kind: 'file', handle };
+            } catch (err) { handlePickError(err); }
+        }
+        if (hasDirPicker()) {
+            try { return { kind: 'dir', handle: await getDirectoryHandle() }; }
+            catch (err) { handlePickError(err); }
+        }
+        return null;
+    }
+
+    // 等用户在面板里再点一次按钮（刷新“用户操作”授权），点击后返回
+    function waitForUserClick(ui, message, label) {
+        return new Promise(resolve => {
+            const status = ui.panel.querySelector('#status-text');
+            status.textContent = message;
+            ui.panel.querySelectorAll('.m3u8-pick-btn').forEach(b => b.remove());
+            const btn = document.createElement('button');
+            btn.type = 'button'; btn.className = 'm3u8-pick-btn'; btn.textContent = label;
+            btn.style.cssText = 'margin:6px 0;padding:6px 14px;border-radius:12px;border:1px solid rgba(0,122,255,.5);background:rgba(0,122,255,.3);color:inherit;font-size:13px;cursor:pointer;';
+            btn.addEventListener('click', () => { btn.remove(); resolve(); }, { once: true });
+            status.insertAdjacentElement('afterend', btn);
+        });
     }
 
     // ========== 下载控制类 ==========
@@ -537,7 +584,7 @@
             this.ui = ui; this.url = url; this.concurrency = concurrency;
             this.abortController = null; this.paused = false;
             this.completed = 0; this.total = 0; this.bytes = 0; this.startTime = 0;
-            this.mode = 'memory'; this.writable = null; this.dirHandle = null;
+            this.mode = 'memory'; this.writable = null; this.dirHandle = null; this.fileHandle = null; this.startBytes = 0;
             this.segmentBlobs = []; this.mapBlob = null;
             this.currentFilename = createDownloadFilename(); this.previousFilename = '';
             this.segments = []; this.mapUri = null; this.keyCache = new Map();
@@ -567,22 +614,42 @@
                     throw new Error('unsupported-encryption');
                 }
 
+                // 磁盘模式暂停后继续：沿用已打开的文件，不重新选择位置、不重头下载
+                const resumingDisk = this.mode === 'disk' && !!this.writable;
+                if (resumingDisk && manifest.segments.length !== this.total) throw new Error('M3U8 片段数已变化，无法续传，请清理后重试');
+
                 this.mapUri = manifest.mapUri; this.segments = manifest.segments; this.total = this.segments.length;
                 this.totalDuration = manifest.totalDuration; this.estimatedSize = estimateFileSize(this.totalDuration);
 
-                let useDisk = (this.totalDuration > 0 && this.estimatedSize > SIZE_THRESHOLD) || this.totalDuration === 0;
-                if (useDisk && typeof window.showDirectoryPicker !== 'function') { useDisk = false; }
-                else if (useDisk) {
-                    try { this.dirHandle = await getDirectoryHandle(); }
-                    catch (err) {
-                        if (err.message === 'CrossOriginIframe') { useDisk = false; status.textContent = '⚠️ 跨域iframe，已自动切换为内存下载'; }
-                        else if (err.message === '用户取消') throw err; else throw err;
+                if (!resumingDisk) {
+                    let useDisk = (this.totalDuration > 0 && this.estimatedSize > SIZE_THRESHOLD) || this.totalDuration === 0;
+                    if (useDisk && !hasSavePicker() && !hasDirPicker()) { useDisk = false; }
+                    else if (useDisk) {
+                        try {
+                            let target;
+                            try {
+                                if (!userGestureActive()) throw new Error('NeedGesture');
+                                target = await pickSaveTarget(this.currentFilename);
+                            } catch (err) {
+                                if (err.message !== 'NeedGesture') throw err;
+                                // 拉取 M3U8 期间授权已过期：让用户再点一次，立即弹出选择器
+                                await waitForUserClick(this.ui, '💾 请点击按钮选择保存位置', '选择保存位置');
+                                target = await pickSaveTarget(this.currentFilename);
+                            }
+                            if (!target) { useDisk = false; status.textContent = '⚠️ 无法选择保存位置，已自动切换为内存下载'; }
+                            else if (target.kind === 'file') { this.fileHandle = target.handle; this.dirHandle = null; }
+                            else { this.dirHandle = target.handle; this.fileHandle = null; }
+                        } catch (err) {
+                            if (err.message === 'CrossOriginIframe') { useDisk = false; status.textContent = '⚠️ 跨域iframe，已自动切换为内存下载'; }
+                            else if (err.message === 'NeedGesture') { useDisk = false; status.textContent = '⚠️ 未获得选择保存位置的授权，已自动切换为内存下载'; }
+                            else throw err;
+                        }
                     }
+                    this.mode = useDisk ? 'disk' : 'memory';
                 }
-                this.mode = useDisk ? 'disk' : 'memory';
                 mInfo.textContent = `💡 ${this.mode === 'disk' ? '边下边存' : '内存下载'} · ${this.totalDuration > 0 ? `预估 ${(this.estimatedSize/1024/1024).toFixed(0)}MB` : '无法预估时长'}`;
 
-                if (this.mapUri) {
+                if (this.mapUri && !resumingDisk) {
                     status.textContent = '📥 初始化段...';
                     this.mapBlob = await downloadAndDecrypt(this.mapUri, this.url, null, null, this.keyCache, 0, MAX_RETRIES);
                 }
@@ -606,14 +673,19 @@
             const dBtn = panel.querySelector('#download-btn'), pBtn = panel.querySelector('#pause-btn');
             const cBtn = panel.querySelector('#cleanup-btn');
 
-            if (!this.dirHandle) throw new Error('目录句柄不可用');
-            const fh = await this.dirHandle.getFileHandle(this.currentFilename, { create: true });
-            this.writable = await fh.createWritable();
-
-            if (this.mapBlob) await this.writable.write(this.mapBlob);
-
-            this.completed = 0; this.bytes = this.mapBlob ? this.mapBlob.size : 0;
-            this.startTime = Date.now(); this.abortController = new AbortController();
+            if (!this.writable) {
+                // 首次：创建文件并打开写入流（单文件模式用选择器返回的句柄，目录模式在目录里新建）
+                let fh = this.fileHandle;
+                if (!fh) {
+                    if (!this.dirHandle) throw new Error('保存位置不可用');
+                    fh = await this.dirHandle.getFileHandle(this.currentFilename, { create: true });
+                }
+                this.writable = await fh.createWritable();
+                this.completed = 0; this.bytes = 0;
+                if (this.mapBlob) { await this.writable.write(this.mapBlob); this.bytes = this.mapBlob.size; }
+            }
+            // 暂停后继续时 completed / bytes 保持不变，从下一个未写入的片段接着写
+            this.startTime = Date.now(); this.startBytes = this.bytes; this.abortController = new AbortController();
 
             pBtn.disabled = false; pBtn.innerHTML = ICONS.pause;
             pBtn.onclick = () => this.togglePause();
@@ -622,12 +694,13 @@
                 const pct = (this.completed / this.total * 100).toFixed(1);
                 pb.style.width = pct + '%'; pt.textContent = `${pct}% (${this.completed}/${this.total})`;
                 const elapsed = (Date.now() - this.startTime) / 1000;
-                st.textContent = `${elapsed > 0 ? (this.bytes / 1024 / elapsed).toFixed(1) : '0'} KB/s`;
+                st.textContent = `${elapsed > 0 ? ((this.bytes - this.startBytes) / 1024 / elapsed).toFixed(1) : '0'} KB/s`;
             };
+            updateProgress();
 
             status.textContent = `📥 下载中 (${this.total} 片段，串行)`;
 
-            for (let i = 0; i < this.segments.length; i++) {
+            for (let i = this.completed; i < this.segments.length; i++) {
                 if (this.paused) {
                     cBtn.style.display = 'flex';
                     status.textContent = '⏸️ 已暂停，点击 ▶ 继续';
@@ -651,6 +724,7 @@
             }
 
             await this.writable.close();
+            this.writable = null;
             if (this.paused) {
                 cBtn.style.display = 'flex';
                 status.textContent = '⏸️ 已暂停，点击 ▶ 继续';
@@ -664,7 +738,7 @@
             ball.classList.add('done'); dBtn.disabled = false; pBtn.disabled = true;
             dBtn.classList.remove('retry'); dBtn.innerHTML = ICONS.download;
             cBtn.style.display = 'flex';
-            status.textContent = `✅ 完成：${this.currentFilename} (${fileSizeMB}MB)`;
+            status.textContent = `✅ 完成：${(this.fileHandle && this.fileHandle.name) || this.currentFilename} (${fileSizeMB}MB)`;
             if (typeof GM_notification !== 'undefined') GM_notification({ title: '下载完成', text: `${fileSizeMB}MB`, timeout: 5000 });
         }
 
@@ -778,13 +852,13 @@
             const releasedMB = (releasedSize / 1024 / 1024).toFixed(2);
             this.cleanup();
             this.ui.panel.querySelector('#cleanup-btn').style.display = 'none';
-            this.ui.panel.querySelector('#status-text').textContent = `🗑️ 已释放 ${releasedMB} MB 内存`;
+            this.ui.panel.querySelector('#status-text').textContent = this.mode === 'disk' ? '🗑️ 已放弃未完成的下载' : `🗑️ 已释放 ${releasedMB} MB 内存`;
         }
 
         cleanup() {
             this.segmentBlobs = null; this.mapBlob = null; this.segments = null; this.keyCache.clear();
             if (this.abortController) { try { this.abortController.abort(); } catch(_) {} this.abortController = null; }
-            if (this.writable) { try { this.writable.close(); } catch(_) {} this.writable = null; }
+            if (this.writable) { const w = this.writable; this.writable = null; try { Promise.resolve(w.abort()).catch(() => {}); } catch(_) {} }
         }
     }
 
