@@ -11,6 +11,8 @@
 // @grant        GM_setClipboard
 // @grant        GM_registerMenuCommand
 // @grant        GM_unregisterMenuCommand
+// @grant        GM_getValue
+// @grant        GM_setValue
 // @connect      *
 // @run-at       document-idle
 // @license      MIT
@@ -33,8 +35,16 @@
     let savedDirHandle = null;
     let currentDownload = null;
 
-    // 自动嗅探默认关闭
-    let sniffEnabled = false;
+    // 自动嗅探默认开启；用户的开关选择通过油猴存储持久化，刷新页面后仍然保留
+    const SNIFF_SETTING_KEY = 'm3u8_auto_sniff_enabled';
+    let sniffEnabled = true;
+    try {
+        if (typeof GM_getValue === 'function') {
+            sniffEnabled = GM_getValue(SNIFF_SETTING_KEY, true) !== false;
+        }
+    } catch (_) {
+        sniffEnabled = true;
+    }
     const filenameCounts = new Map();
     let menuCommandIds = [];
 
@@ -209,6 +219,11 @@
             const label = sniffEnabled ? '✅ 自动嗅探-ON' : '🚫 自动嗅探-OFF';
             const id = GM_registerMenuCommand(label, () => {
                 sniffEnabled = !sniffEnabled;
+                try {
+                    if (typeof GM_setValue === 'function') {
+                        GM_setValue(SNIFF_SETTING_KEY, sniffEnabled);
+                    }
+                } catch (_) {}
                 registerMenuCommands();
                 showToast(sniffEnabled ? '自动嗅探已开启' : '自动嗅探已关闭');
                 if (isSniffingActive()) {
@@ -782,7 +797,7 @@
         const ui = createUI();
         uiInstance = ui;
         registerMenuCommands();
-        // 默认关闭自动嗅探；用户可通过油猴菜单开启
+        // 自动嗅探默认开启；菜单开关状态由 GM 存储持久化
         monitorVideoPlay(ui);
         const origFetch = window.fetch;
         window.fetch = async function(...args) {
