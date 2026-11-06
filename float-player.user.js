@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         悬浮媒体播放器 (iOS 玻璃质感)
 // @namespace    https://github.com/520luo/js/float-player
-// @version      26.11.06.4
+// @version      26.11.06.5
 // @description  识别到页面里的 M3U8 / MP4 / WebM 后，自动在顶部悬浮出 iOS 玻璃质感播放器（默认暂停，可点 ✕ 关闭）；油猴菜单可开关「自动悬浮播放器」「固定悬浮窗」；可联动 M3U8 下载器
 // @icon         https://raw.githubusercontent.com/520LUO/icons/refs/heads/main/player.png
 // @author       520LUO
@@ -333,6 +333,10 @@
 }
 .iosgp-track:hover,
 .iosgp-track.iosgp-dragging { height: 11px; }
+.iosgp-visible .iosgp-track {
+  -webkit-backdrop-filter: blur(8px);
+  backdrop-filter: blur(8px);
+}
 .iosgp-track:focus-visible {
   outline: 2px solid rgba(255,255,255,.9);
   outline-offset: 3px;
@@ -910,7 +914,7 @@
       e.stopPropagation();
       try {
         if (isFs()) await exitFs();
-        else if (host.requestFullscreen) await host.requestFullscreen({ navigationUI: 'hide' });
+        else if (host.requestFullscreen) { try { await host.requestFullscreen({ navigationUI: 'hide' }); } catch (_) { await host.requestFullscreen(); } }
         else host.webkitRequestFullscreen();
       } catch (_) { toast('无法进入全屏'); }
     });
@@ -1170,14 +1174,20 @@
    * =======================================================*/
   const MIN_AUTO_SECONDS = 45; // 短于该时长的视频不自动悬浮（手动点小球不受限）
 
-  // 页面上「有源且可见」的 <video> 数量：多于 1 个时不自动悬浮，避免猜错该播哪个
-  function countPageVideos() {
-    let n = 0;
+  // 页面上有源且可见的 <video> 里，时长已知的那些
+  function pageVideoDurations() {
+    const out = [];
     document.querySelectorAll('video').forEach((v) => {
       if (!(v.currentSrc || v.getAttribute('src') || v.querySelector('source[src]'))) return;
       const r = v.getBoundingClientRect();
-      if (r.width || r.height) n++;
+      if ((r.width || r.height) && isFinite(v.duration) && v.duration > 0) out.push(v.duration);
     });
+    return out;
+  }
+  // 时长相差 2 秒内视为同一个视频（主清单 / 子清单 / <video> 重复嗅探到的是同一个），返回不同视频的个数
+  function distinctCount(list) {
+    let n = 0, last = -Infinity;
+    list.slice().sort((x, y) => x - y).forEach((d) => { if (d - last > 2) n++; last = d; });
     return n;
   }
 
@@ -1215,24 +1225,33 @@
   }
 
   let autoTimer = 0, autoProbing = false;
+  async function autoDecide() {
+    // 1) 探测所有候选时长；短于 MIN_AUTO_SECONDS 的直接跳过（只影响自动弹出）
+    for (let round = 0; round < 3; round++) {
+      const todo = [...found.values()].filter((i) => !dismissed.has(i.url) && i._dur === undefined).sort((x, y) => y.t - x.t).slice(0, 6);
+      if (!todo.length) break;
+      await Promise.all(todo.map(probeDuration));
+      todo.forEach((i) => { if (i._dur != null && i._dur < MIN_AUTO_SECONDS) dismissed.add(i.url); });
+    }
+    if (!autoFloat || P) return;
+    // 2) 剩下的「≥45s」视频若不止一个，不自动弹，交给用户点小球选择
+    const longs = pageVideoDurations().filter((d) => d >= MIN_AUTO_SECONDS);
+    found.forEach((i) => { if (!dismissed.has(i.url) && i._dur != null && i._dur >= MIN_AUTO_SECONDS) longs.push(i._dur); });
+    if (distinctCount(longs) > 1) return;
+    const best = pickBest(true);
+    if (best) openPlayer(best, { autoplay: false });
+  }
   function maybeAutoOpen() {
     if (!IS_TOP || !autoFloat || P) return;
     clearTimeout(autoTimer);
-    // 稍作防抖：同一页面常常连续冒出好几个地址，等一下再选最合适的那个
+    // 稍作防抖：同一页面常常连续冒出好几个地址，等一下再统一判断
     autoTimer = setTimeout(async () => {
       if (!autoFloat || P) return;
       if (!document.body) { maybeAutoOpen(); return; }
-      if (autoProbing || countPageVideos() > 1) return;
-      const best = pickBest(true);
-      if (!best) return;
+      if (autoProbing) return;
       autoProbing = true;
-      let d = null;
-      try { d = await probeDuration(best); } catch (_) {}
+      try { await autoDecide(); } catch (_) {}
       autoProbing = false;
-      if (!autoFloat || P) return;
-      if (d !== null && d < MIN_AUTO_SECONDS) { dismissed.add(best.url); maybeAutoOpen(); return; } // 太短：跳过，换下一个候选
-      if (countPageVideos() > 1) return;
-      openPlayer(best, { autoplay: false });
     }, 500);
   }
 
