@@ -1,8 +1,8 @@
 // ==UserScript==
-// @name         悬浮媒体播放器
+// @name         悬浮媒体播放器 (iOS 玻璃质感)
 // @namespace    https://github.com/520luo/js/float-player
-// @version      26.11.06.1
-// @description  识别到页面里的 M3U8 / MP4 / WebM 后，自动在顶部悬浮出 iOS 玻璃质感播放器（默认暂停，可点 ✕ 关闭）；油猴菜单可开关「自动悬浮播放器」
+// @version      26.11.06.2
+// @description  识别到页面里的 M3U8 / MP4 / WebM 后，自动在顶部悬浮出 iOS 玻璃质感播放器（默认暂停，可点 ✕ 关闭）；油猴菜单可开关「自动悬浮播放器」「固定悬浮窗」；可联动 M3U8 下载器
 // @icon         https://raw.githubusercontent.com/520LUO/icons/refs/heads/main/player.png
 // @author       520LUO
 // @match        *://*/*
@@ -34,7 +34,11 @@
   const AUTO_KEY = 'mf_float_player_auto';
   let autoFloat = true;
   try { if (typeof GM_getValue === 'function') autoFloat = GM_getValue(AUTO_KEY, true) !== false; } catch (_) {}
+  const FIXED_KEY = 'mf_float_player_fixed';
+  let fixedMode = true; // 固定悬浮窗（默认开）；关闭后可单指拖动、双指捏合缩放
+  try { if (typeof GM_getValue === 'function') fixedMode = GM_getValue(FIXED_KEY, true) !== false; } catch (_) {}
   let menuIds = [];
+  const freeView = { x: 0, y: 0, s: 1 }; // 自由模式下悬浮窗的偏移 / 缩放（重新打开时保留）
 
   function pageToast(message) {
     if (!document.documentElement) return;
@@ -73,6 +77,15 @@
         if (autoFloat) maybeAutoOpen();
       });
       if (id !== undefined) menuIds.push(id);
+      const id2 = GM_registerMenuCommand(fixedMode ? '📌 固定悬浮窗-ON' : '🖐 固定悬浮窗-OFF（可拖动 / 捏合）', () => {
+        fixedMode = !fixedMode;
+        try { if (typeof GM_setValue === 'function') GM_setValue(FIXED_KEY, fixedMode); } catch (_) {}
+        if (fixedMode) { freeView.x = 0; freeView.y = 0; freeView.s = 1; }
+        registerMenu();
+        pageToast(fixedMode ? '悬浮窗已固定' : '悬浮窗已解锁：单指拖动，双指捏合缩放');
+        if (P) P.applyLayout();
+      });
+      if (id2 !== undefined) menuIds.push(id2);
     } catch (_) {}
   }
 
@@ -489,6 +502,42 @@
 `;
 
   const EXTRA_CSS = `
+/* —— 去掉触摸时的蓝色选中框 / 焦点框 / 长按菜单，并禁止选中文字 —— */
+*, *::before, *::after { -webkit-tap-highlight-color: transparent; -webkit-touch-callout: none; }
+.iosgp-wrapper, .iosgp-wrapper * { -webkit-user-select: none; user-select: none; }
+.iosgp-wrapper, .iosgp-btn, .iosgp-track, .iosgp-menu-item, .iosgp-speed-chip, video { outline: none !important; }
+.iosgp-btn:focus, .iosgp-btn:focus-visible, .iosgp-track:focus, .iosgp-track:focus-visible,
+.iosgp-menu-item:focus, .iosgp-speed-chip:focus { outline: none !important; box-shadow: none; }
+.iosgp-wrapper video { pointer-events: none; }
+.iosgp-wrapper { touch-action: manipulation; }
+
+/* —— 布局：进度条在上、按钮在下，右下角放得下 倍速 / 画中画 / 全屏 —— */
+.iosgp-bottom { bottom: 56px; padding: 0 16px; }
+.iosgp-corner-actions { right: 12px; bottom: 12px; gap: 8px; }
+.iosgp-corner-actions-left { left: 12px; bottom: 12px; }
+.iosgp-top-actions-left { left: 12px; top: 12px; }
+.iosgp-top-actions-right { right: 12px; top: 12px; }
+.iosgp-btn.iosgp-speed-btn { width: auto; min-width: 46px; padding: 0 11px; border-radius: 18px; font-size: 13px; font-weight: 700;
+  font-variant-numeric: tabular-nums; letter-spacing: .01em; }
+
+/* —— 弹出菜单整体按播放器宽度缩放（--iosgp-scale 约 0.85 ~ 1.25） —— */
+.iosgp-menu { min-width: calc(150px * var(--iosgp-scale, 1)); border-radius: calc(13px * var(--iosgp-scale, 1)); top: 42px; }
+.iosgp-menu-item { font-size: calc(11.5px * var(--iosgp-scale, 1)); padding: calc(8px * var(--iosgp-scale, 1)) calc(11px * var(--iosgp-scale, 1)); gap: calc(8px * var(--iosgp-scale, 1)); }
+.iosgp-menu-item svg { width: calc(14px * var(--iosgp-scale, 1)); height: calc(14px * var(--iosgp-scale, 1)); }
+.iosgp-menu-speed-label { font-size: calc(9.5px * var(--iosgp-scale, 1)); padding: calc(7px * var(--iosgp-scale, 1)) calc(11px * var(--iosgp-scale, 1)) calc(3px * var(--iosgp-scale, 1)); }
+.iosgp-menu-speed-grid { gap: calc(5px * var(--iosgp-scale, 1)); padding: calc(4px * var(--iosgp-scale, 1)) calc(9px * var(--iosgp-scale, 1)) calc(9px * var(--iosgp-scale, 1)); }
+.iosgp-speed-chip { font-size: calc(11.5px * var(--iosgp-scale, 1)); padding: calc(6px * var(--iosgp-scale, 1)) calc(8px * var(--iosgp-scale, 1)); border-radius: calc(8px * var(--iosgp-scale, 1)); }
+
+/* —— 倍速弹出菜单：贴在倍速按钮上方，右对齐 —— */
+.iosgp-speed-pop { position: absolute; right: 12px; bottom: 56px; z-index: 5; padding: calc(8px * var(--iosgp-scale, 1));
+  border-radius: calc(14px * var(--iosgp-scale, 1)); background: rgba(28,28,30,.62);
+  -webkit-backdrop-filter: blur(24px) saturate(180%); backdrop-filter: blur(24px) saturate(180%);
+  border: 1px solid rgba(255,255,255,.22); box-shadow: 0 14px 32px rgba(0,0,0,.35), inset 0 1px 0 rgba(255,255,255,.15);
+  opacity: 0; transform: translateY(6px) scale(.96); transform-origin: bottom right; pointer-events: none;
+  transition: opacity .18s cubic-bezier(.4,0,.2,1), transform .22s cubic-bezier(.34,1.56,.64,1); }
+.iosgp-speed-pop.iosgp-open { opacity: 1; transform: translateY(0) scale(1); pointer-events: auto; }
+.iosgp-speed-pop .iosgp-menu-speed-grid { grid-template-columns: repeat(3, minmax(calc(46px * var(--iosgp-scale, 1)), 1fr)); padding: 0; }
+
 .iosgp-wrapper { width: 100%; aspect-ratio: 16 / 9; border-radius: 18px; background: #000;
   box-shadow: 0 12px 38px rgba(0,0,0,.5), 0 0 0 1px rgba(255,255,255,.12); }
 .iosgp-wrapper.iosgp-fs { width: 100vw; height: 100dvh; aspect-ratio: auto; border-radius: 0; box-shadow: none; }
@@ -636,7 +685,9 @@
     const pipBtn = makeButton('iosgp-btn iosgp-corner-btn', ICONS.pip, '画中画');
     const fullscreenBtn = makeButton('iosgp-btn iosgp-corner-btn', ICONS.fullscreen, '全屏');
     const cornerActions = document.createElement('div'); cornerActions.className = 'iosgp-corner-actions';
-    cornerActions.append(pipBtn, fullscreenBtn);
+    const speedBtn = makeButton('iosgp-btn iosgp-speed-btn', '1x', '播放速度');
+    speedBtn.innerHTML = '<span>1x</span>';
+    cornerActions.append(speedBtn, pipBtn, fullscreenBtn);
 
     const muteBtn = makeButton('iosgp-btn iosgp-corner-btn', ICONS.volumeOn, '静音');
     const cornerActionsLeft = document.createElement('div'); cornerActionsLeft.className = 'iosgp-corner-actions-left';
@@ -653,12 +704,14 @@
     const downloadItem = makeMenuItem(ICONS.download, '下载视频');
     const copyItem = makeMenuItem(ICONS.link, '复制视频链接');
     const speedGrid = chipGrid(SPEED_OPTIONS, (r) => `${r}x`);
+    const speedPop = document.createElement('div'); speedPop.className = 'iosgp-speed-pop';
+    speedPop.appendChild(speedGrid);
     const qualityLabel = menuLabel('清晰度');
     const qualityBox = document.createElement('div');
     const sourceLabel = menuLabel('视频源');
     const sourceBox = document.createElement('div');
     const menu = document.createElement('div'); menu.className = 'iosgp-menu';
-    menu.append(downloadItem, copyItem, menuLabel('播放速度'), speedGrid, qualityLabel, qualityBox, sourceLabel, sourceBox);
+    menu.append(downloadItem, copyItem, qualityLabel, qualityBox, sourceLabel, sourceBox);
     const menuWrap = document.createElement('div'); menuWrap.className = 'iosgp-menu-wrap';
     menuWrap.append(moreBtn, menu);
     const topActionsRight = document.createElement('div'); topActionsRight.className = 'iosgp-top-actions-right';
@@ -667,10 +720,10 @@
     const spin = document.createElement('div'); spin.className = 'iosgp-spin';
     const toastEl = document.createElement('div'); toastEl.className = 'iosgp-toast';
 
-    controls.append(scrim, center, bottom, cornerActions, cornerActionsLeft, topActionsLeft, topActionsRight, spin, toastEl);
+    controls.append(scrim, center, bottom, cornerActions, cornerActionsLeft, topActionsLeft, topActionsRight, speedPop, spin, toastEl);
     return {
       controls, backBtn, playBtn, fwdBtn, track, buffered, filled, thumb, curTime, durTime, pipBtn, fullscreenBtn,
-      muteBtn, closeBtn, returnBtn, moreBtn, menu, downloadItem, copyItem, speedGrid, qualityLabel, qualityBox,
+      muteBtn, closeBtn, returnBtn, moreBtn, menu, downloadItem, copyItem, speedBtn, speedPop, speedGrid, qualityLabel, qualityBox,
       sourceLabel, sourceBox, spin, toastEl
     };
   }
@@ -680,8 +733,7 @@
    * =======================================================*/
   let P = null; // 当前播放器实例（同一时间只有一个）
 
-  const HOST_STYLE = 'all:initial;position:fixed;top:max(8px,env(safe-area-inset-top));left:50%;transform:translateX(-50%);' +
-    'width:min(94vw,560px);z-index:2147483646;display:block;';
+  const HOST_BASE = 'all:initial;position:fixed;left:50%;z-index:2147483646;display:block;';
   const HOST_STYLE_FS = 'all:initial;position:fixed;inset:0;width:100vw;height:100dvh;z-index:2147483647;display:block;background:#000;';
 
   async function copyText(text) {
@@ -703,7 +755,7 @@
 
     const host = document.createElement('div');
     host.setAttribute('data-mf-float-player', '');
-    host.style.cssText = HOST_STYLE;
+    host.style.cssText = HOST_BASE + 'top:8px;width:min(94vw,560px);transform:translateX(-50%);';
     const root = host.attachShadow({ mode: 'open' });
     root.innerHTML = `<style>${CSS_TEXT}${EXTRA_CSS}</style>
       <div class="iosgp-wrapper"><video playsinline webkit-playsinline preload="metadata"></video></div>`;
@@ -713,11 +765,11 @@
     wrapper.appendChild(refs.controls);
     const {
       controls, backBtn, playBtn, fwdBtn, track, buffered, filled, thumb, curTime, durTime, pipBtn, fullscreenBtn,
-      muteBtn, closeBtn, returnBtn, moreBtn, menu, downloadItem, copyItem, speedGrid, qualityLabel, qualityBox,
+      muteBtn, closeBtn, returnBtn, moreBtn, menu, downloadItem, copyItem, speedBtn, speedPop, speedGrid, qualityLabel, qualityBox,
       sourceLabel, sourceBox, spin, toastEl
     } = refs;
 
-    P = { host, video, hls: null, current: item, closed: false };
+    P = { host, video, hls: null, current: item, closed: false, applyLayout: () => applyLayout() };
     const cleanups = [];
     const onDoc = (ev, fn) => { document.addEventListener(ev, fn); cleanups.push(() => document.removeEventListener(ev, fn)); };
     document.documentElement.appendChild(host);
@@ -733,7 +785,7 @@
     let hideTimer = 0;
     const scheduleHide = () => {
       clearTimeout(hideTimer);
-      hideTimer = setTimeout(() => { if (!video.paused && !menu.classList.contains('iosgp-menu-open')) controls.classList.remove('iosgp-visible'); }, HIDE_DELAY);
+      hideTimer = setTimeout(() => { if (!video.paused && !menu.classList.contains('iosgp-menu-open') && !speedPop.classList.contains('iosgp-open')) controls.classList.remove('iosgp-visible'); }, HIDE_DELAY);
     };
     const showControls = () => { controls.classList.add('iosgp-visible'); scheduleHide(); };
     const hideControlsNow = () => { clearTimeout(hideTimer); controls.classList.remove('iosgp-visible'); };
@@ -741,7 +793,7 @@
     wrapper.addEventListener('pointerenter', (e) => { if (e.pointerType === 'mouse') showControls(); });
     wrapper.addEventListener('pointermove', (e) => { if (e.pointerType === 'mouse') showControls(); });
     wrapper.addEventListener('pointerleave', (e) => { if (e.pointerType === 'mouse') { clearTimeout(hideTimer); if (!video.paused) controls.classList.remove('iosgp-visible'); } });
-    wrapper.addEventListener('click', () => { controls.classList.contains('iosgp-visible') ? hideControlsNow() : showControls(); });
+    wrapper.addEventListener('click', () => { if (suppressClick) return; closePopups(); controls.classList.contains('iosgp-visible') ? hideControlsNow() : showControls(); });
 
     /* ---- 播放 / 暂停 ---- */
     const syncPlayState = () => {
@@ -822,9 +874,9 @@
     const isFs = () => document.fullscreenElement === host || document.webkitFullscreenElement === host;
     const applyFs = () => {
       const fs = isFs();
-      host.style.cssText = fs ? HOST_STYLE_FS : HOST_STYLE;
       wrapper.classList.toggle('iosgp-fs', fs);
-      if (!fs) applyAspect();
+      applyLayout();
+      sendDl(fs ? 'close' : 'reposition');
       closeBtn.style.display = fs ? 'none' : 'flex';
       returnBtn.style.display = fs ? 'flex' : 'none';
       fullscreenBtn.innerHTML = fs ? ICONS.fullscreenExit : ICONS.fullscreen;
@@ -849,24 +901,108 @@
     onDoc('webkitfullscreenchange', applyFs);
 
     // 按视频真实比例调整悬浮窗：竖屏视频不会撑得过高
+    let hostWidth = 'min(94vw, 560px)';
     function applyAspect() {
       const vw = video.videoWidth, vh = video.videoHeight;
       if (!vw || !vh || isFs()) return;
       const ratio = vw / vh;
       wrapper.style.aspectRatio = String(ratio);
-      host.style.width = `min(94vw, 560px, calc(62vh * ${ratio.toFixed(4)}))`;
+      hostWidth = `min(94vw, 560px, calc(62vh * ${ratio.toFixed(4)}))`;
+      applyLayout();
     }
     video.addEventListener('loadedmetadata', applyAspect);
 
+    // 固定模式：顶部居中不动；自由模式：按 freeView 偏移 / 缩放（以顶部中点为缩放原点）
+    function applyLayout() {
+      if (!P || P.closed) return;
+      if (isFs()) { host.style.cssText = HOST_STYLE_FS; return; }
+      const free = !fixedMode;
+      const top = free ? `calc(max(8px, env(safe-area-inset-top)) + ${freeView.y}px)` : 'max(8px, env(safe-area-inset-top))';
+      const tx = free ? `calc(-50% + ${freeView.x}px)` : '-50%';
+      host.style.cssText = `${HOST_BASE}top:${top};width:${hostWidth};transform:translateX(${tx}) scale(${free ? freeView.s : 1});transform-origin:top center;`;
+      wrapper.style.touchAction = free ? 'none' : 'manipulation';
+    }
+    applyLayout();
+
+    /* ---- 自由模式手势：单指拖动、双指捏合缩放 ---- */
+    const ptrs = new Map();
+    let gesture = null, suppressClick = false;
+    const MIN_SCALE = 0.4;
+    const maxScale = () => Math.max(1, innerWidth / Math.max(1, host.offsetWidth));
+    const noGesture = (e) => { const t = e.composedPath && e.composedPath()[0]; return t && t.closest && t.closest('button, .iosgp-track, .iosgp-menu, .iosgp-speed-pop'); };
+    const beginGesture = () => {
+      const pts = [...ptrs.values()];
+      if (pts.length >= 2) gesture = { mode: 'pinch', d0: Math.hypot(pts[0].x - pts[1].x, pts[0].y - pts[1].y) || 1, s0: freeView.s };
+      else if (pts.length === 1) gesture = { mode: 'drag', sx: pts[0].x, sy: pts[0].y, x0: freeView.x, y0: freeView.y, moved: false };
+      else gesture = null;
+    };
+    wrapper.addEventListener('pointerdown', (e) => {
+      if (fixedMode || isFs() || noGesture(e)) return;
+      ptrs.set(e.pointerId, { x: e.clientX, y: e.clientY });
+      try { wrapper.setPointerCapture(e.pointerId); } catch (_) {}
+      beginGesture();
+    });
+    wrapper.addEventListener('pointermove', (e) => {
+      if (!ptrs.has(e.pointerId) || !gesture) return;
+      ptrs.set(e.pointerId, { x: e.clientX, y: e.clientY });
+      if (gesture.mode === 'pinch' && ptrs.size >= 2) {
+        const pts = [...ptrs.values()];
+        const d = Math.hypot(pts[0].x - pts[1].x, pts[0].y - pts[1].y);
+        freeView.s = clamp(gesture.s0 * d / gesture.d0, MIN_SCALE, maxScale());
+        suppressClick = true; applyLayout();
+      } else if (gesture.mode === 'drag') {
+        const dx = e.clientX - gesture.sx, dy = e.clientY - gesture.sy;
+        if (!gesture.moved && Math.hypot(dx, dy) < 8) return;
+        gesture.moved = true; suppressClick = true;
+        freeView.x = clamp(gesture.x0 + dx, -innerWidth / 2, innerWidth / 2);
+        freeView.y = clamp(gesture.y0 + dy, -8, innerHeight - 90);
+        applyLayout();
+      }
+    });
+    const endPointer = (e) => {
+      if (!ptrs.delete(e.pointerId)) return;
+      try { wrapper.releasePointerCapture(e.pointerId); } catch (_) {}
+      if (ptrs.size === 0) {
+        gesture = null;
+        setTimeout(() => { suppressClick = false; }, 60);
+        sendDl('reposition');
+      } else beginGesture(); // 双指变单指：以剩下的那根手指继续拖动
+    };
+    wrapper.addEventListener('pointerup', endPointer);
+    wrapper.addEventListener('pointercancel', endPointer);
+
     /* ---- 更多菜单 ---- */
     const closeMenu = () => { menu.classList.remove('iosgp-menu-open'); root.removeEventListener('click', closeMenu); };
+    const closeSpeed = () => { speedPop.classList.remove('iosgp-open'); root.removeEventListener('click', closeSpeed); };
+    function closePopups() { closeMenu(); closeSpeed(); }
+
+    /* ---- 倍速：右下角按钮，点击向上弹出菜单 ---- */
+    const speedText = speedBtn.querySelector('span');
+    const syncSpeed = () => {
+      const r = video.playbackRate;
+      speedText.textContent = `${r}x`;
+      speedGrid.querySelectorAll('.iosgp-speed-chip').forEach((c) => c.classList.toggle('iosgp-speed-active', Math.abs(parseFloat(c.dataset.v) - r) < 0.001));
+    };
+    video.addEventListener('ratechange', syncSpeed);
+    syncSpeed();
+    speedBtn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      if (speedPop.classList.contains('iosgp-open')) { closeSpeed(); return; }
+      closeMenu(); syncSpeed();
+      speedPop.classList.add('iosgp-open');
+      clearTimeout(hideTimer);
+      setTimeout(() => root.addEventListener('click', closeSpeed), 0);
+    });
+    speedPop.addEventListener('click', (e) => e.stopPropagation());
+    speedGrid.querySelectorAll('.iosgp-speed-chip').forEach((chip) => chip.addEventListener('click', (e) => {
+      e.stopPropagation(); video.playbackRate = parseFloat(chip.dataset.v); closeSpeed(); scheduleHide();
+    }));
     function renderMenu() {
       const cur = P.current;
-      // 下载：直链文件可下载；m3u8 清单不是完整视频，置灰
-      downloadItem.disabled = cur.type !== 'file';
+      // 下载：直链文件走浏览器下载；M3U8 联动「M3U8 媒体下载器」脚本
+      downloadItem.disabled = false;
+      downloadItem.querySelector('.iosgp-menu-label').textContent = cur.type === 'hls' ? '下载视频（M3U8）' : '下载视频';
       copyItem.disabled = false;
-      // 倍速
-      speedGrid.querySelectorAll('.iosgp-speed-chip').forEach((c) => c.classList.toggle('iosgp-speed-active', Math.abs(parseFloat(c.dataset.v) - video.playbackRate) < 0.001));
       // 清晰度（仅 HLS 多码率）
       qualityBox.innerHTML = '';
       const hls = P.hls;
@@ -895,6 +1031,7 @@
       });
     }
     function openMenu() {
+      closeSpeed();
       renderMenu();
       menu.style.maxHeight = Math.max(120, wrapper.clientHeight - 64) + 'px';
       menu.classList.add('iosgp-menu-open');
@@ -902,9 +1039,6 @@
     }
     moreBtn.addEventListener('click', (e) => { e.stopPropagation(); menu.classList.contains('iosgp-menu-open') ? closeMenu() : openMenu(); });
     menu.addEventListener('click', (e) => e.stopPropagation());
-    speedGrid.querySelectorAll('.iosgp-speed-chip').forEach((chip) => chip.addEventListener('click', (e) => {
-      e.stopPropagation(); video.playbackRate = parseFloat(chip.dataset.v); closeMenu();
-    }));
     copyItem.addEventListener('click', async (e) => {
       e.stopPropagation();
       const label = copyItem.querySelector('.iosgp-menu-label'), original = label.textContent;
@@ -915,6 +1049,13 @@
     downloadItem.addEventListener('click', (e) => {
       e.stopPropagation();
       if (downloadItem.disabled) return;
+      if (P.current.type === 'hls') {
+        if (!document.documentElement.hasAttribute('data-m3u8dl')) { toast('未检测到「M3U8 媒体下载器」脚本'); closeMenu(); return; }
+        closeMenu();
+        // 延后一拍再发：下载器有“点击空白处收起面板”的全局监听，避免刚打开就被它收掉
+        setTimeout(() => sendDl('open'), 0);
+        return;
+      }
       try {
         const a = document.createElement('a');
         a.href = P.current.url; a.download = decodeURIComponent(new URL(P.current.url).pathname.split('/').pop() || 'video.mp4'); a.rel = 'noopener';
@@ -925,7 +1066,7 @@
 
     /* ---- 菜单自适应缩放 ---- */
     const ro = new ResizeObserver(([entry]) => {
-      const scale = Math.max(0.55, Math.min(entry.contentRect.width / 640, 1.3));
+      const scale = Math.max(0.85, Math.min(entry.contentRect.width / 480, 1.25));
       controls.style.setProperty('--iosgp-scale', scale.toFixed(3));
     });
     ro.observe(wrapper);
@@ -966,6 +1107,21 @@
       if (autoplay) video.play().catch(() => {});
     }
 
+    /* ---- 联动 M3U8 下载器：让它的面板出现在悬浮窗正下方 ---- */
+    function sendDl(type) {
+      if (!document.documentElement.hasAttribute('data-m3u8dl')) return;
+      if (type === 'reposition' && !dlShown) return;
+      if (type === 'open') dlShown = true;
+      if (type === 'close') dlShown = false;
+      const r = host.getBoundingClientRect();
+      try {
+        window.dispatchEvent(new CustomEvent('m3u8dl:' + type, {
+          detail: JSON.stringify({ url: P ? P.current.url : '', top: Math.round(r.bottom + 8), left: Math.round(r.left), width: Math.round(r.width) })
+        }));
+      } catch (_) {}
+    }
+    let dlShown = false;
+
     /* ---- 关闭 ---- */
     function close(byUser) {
       if (!P || P.closed) return;
@@ -978,6 +1134,7 @@
       try { if (document.pictureInPictureElement === video) document.exitPictureInPicture(); } catch (_) {}
       try { if (isFs()) document.exitFullscreen(); } catch (_) {}
       try { screen.orientation && screen.orientation.unlock && screen.orientation.unlock(); } catch (_) {}
+      sendDl('close');
       host.remove();
       // 用户点 ✕：当前已识别的地址都不再自动悬浮（之后出现的新地址仍会）
       if (byUser) found.forEach((_, url) => dismissed.add(url));
@@ -988,7 +1145,7 @@
     for (const ev of ['keydown', 'keyup', 'keypress']) host.addEventListener(ev, (e) => e.stopPropagation());
 
     /* ---- 靠近 / 触摸按钮时放大 + 高光（沿用原脚本的 Dock 磁性效果） ---- */
-    const magnetic = [backBtn, playBtn, fwdBtn, pipBtn, fullscreenBtn, muteBtn, closeBtn, returnBtn, moreBtn];
+    const magnetic = [backBtn, playBtn, fwdBtn, speedBtn, pipBtn, fullscreenBtn, muteBtn, closeBtn, returnBtn, moreBtn];
     let magnetFrame = null, lastPointer = null;
     const applyMagnet = () => {
       magnetFrame = null;
@@ -1040,7 +1197,7 @@
     ball.style.cssText = 'position:fixed;left:8px;bottom:140px;width:38px;height:38px;border-radius:50%;display:none;align-items:center;justify-content:center;' +
       'z-index:2147483644;background:rgba(20,20,30,.65);color:#fff;cursor:pointer;user-select:none;touch-action:none;' +
       '-webkit-backdrop-filter:blur(16px) saturate(180%);backdrop-filter:blur(16px) saturate(180%);border:1px solid rgba(255,255,255,.28);' +
-      'box-shadow:0 4px 18px rgba(0,0,0,.25), inset 0 1px 0 rgba(255,255,255,.18)';
+      'box-shadow:0 4px 18px rgba(0,0,0,.25), inset 0 1px 0 rgba(255,255,255,.18);-webkit-tap-highlight-color:transparent;outline:none';
     ball.innerHTML = '<svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor"><path d="M8 5.5v13l11-6.5z"/></svg>' +
       '<span style="position:absolute;top:-3px;right:-3px;min-width:16px;height:16px;padding:0 4px;box-sizing:border-box;border-radius:8px;background:#30d158;color:#fff;font:600 10px/16px system-ui,sans-serif;text-align:center"></span>';
     ballBadge = ball.querySelector('span');

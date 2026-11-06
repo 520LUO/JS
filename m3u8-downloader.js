@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         M3U8媒体下载器 (支持AES-128解密)
 // @namespace    https://github.com/520luo/js/m3u8-downloader
-// @version      26.11.06.5
+// @version      26.11.06.8
 // @description  智能嗅探链接,多线程下载,智能模式,大文件边下边存,小文件内存高速下载,支持解密AES-128,精美的UI
 // @icon         https://raw.githubusercontent.com/520LUO/icons/refs/heads/main/M3U8.png
 // @author       520LUO
@@ -557,7 +557,18 @@
         console.warn('[M3U8] 选择保存位置失败:', name, msg);
     }
 
+    const hasNativeStream = () => typeof GM !== 'undefined' && GM && typeof GM.openFileStream === 'function';
+
     async function pickSaveTarget(filename) {
+        // 优先用 Mafari 的原生流式写入（Download/mafari，逐段落盘不占内存）：WebView 的 showSaveFilePicker 不会触发系统选择器
+        if (typeof GM !== 'undefined' && GM && typeof GM.openFileStream === 'function') {
+            try {
+                const stream = await GM.openFileStream(filename, 'video/mp4');
+                return { kind: 'native', stream };
+            } catch (err) {
+                lastPickError += (lastPickError ? '；' : '') + '原生写入失败: ' + (err && err.message || err);
+            }
+        }
         if (hasSavePicker()) {
             const t0 = performance.now();
             try {
@@ -572,15 +583,6 @@
             const t1 = performance.now();
             try { return { kind: 'dir', handle: await getDirectoryHandle() }; }
             catch (err) { handlePickError(err, performance.now() - t1); }
-        }
-        // WebView 的选择器不可用时：用 Mafari 的原生流式写入（Download/mafari，逐段落盘不占内存）
-        if (typeof GM !== 'undefined' && GM && typeof GM.openFileStream === 'function') {
-            try {
-                const stream = await GM.openFileStream(filename, 'video/mp4');
-                return { kind: 'native', stream };
-            } catch (err) {
-                lastPickError += (lastPickError ? '；' : '') + '原生写入失败: ' + (err && err.message || err);
-            }
         }
         return null;
     }
@@ -644,13 +646,13 @@
 
                 if (!resumingDisk) {
                     let useDisk = (this.totalDuration > 0 && this.estimatedSize > SIZE_THRESHOLD) || this.totalDuration === 0;
-                    if (useDisk && !hasSavePicker() && !hasDirPicker()) { useDisk = false; }
+                    if (useDisk && !hasNativeStream() && !hasSavePicker() && !hasDirPicker()) { useDisk = false; }
                     else if (useDisk) {
                         try {
                             let target;
                             for (let attempt = 0; ; attempt++) {
                                 try {
-                                    if (!userGestureActive()) throw new Error('NeedGesture');
+                                    if (!hasNativeStream() && !userGestureActive()) throw new Error('NeedGesture');
                                     target = await pickSaveTarget(this.currentFilename);
                                     break;
                                 } catch (err) {
@@ -800,9 +802,10 @@
             pb.style.width = '100%'; pb.classList.remove('error-bar'); pt.textContent = '100%';
             ball.classList.add('done'); dBtn.disabled = false; pBtn.disabled = true;
             dBtn.classList.remove('retry'); dBtn.innerHTML = ICONS.download;
-            cBtn.style.display = 'flex';
+            cBtn.style.display = 'none';
             status.textContent = `✅ 完成：${(this.nativeStream && this.nativeStream.name) || (this.fileHandle && this.fileHandle.name) || this.currentFilename} (${fileSizeMB}MB)` +
                 (this.nativeStream ? '，已保存到 Download/mafari' : '');
+            this.releaseMemory();
             if (typeof GM_notification !== 'undefined') GM_notification({ title: '下载完成', text: `${fileSizeMB}MB`, timeout: 5000 });
         }
 
@@ -882,6 +885,9 @@
                 const a = document.createElement('a'); a.href = blobUrl; a.download = this.currentFilename;
                 document.body.appendChild(a); a.click(); a.remove(); URL.revokeObjectURL(blobUrl);
                 status.textContent = `✅ 完成 (${fileSizeMB}MB)`;
+                // 下载已交给浏览器：立即释放所有片段 / 初始化段 / 密钥缓存，不等用户手动点“释放内存”
+                this.releaseMemory();
+                cBtn.style.display = 'none';
                 if (typeof GM_notification !== 'undefined') GM_notification({ title: '下载完成', text: `${fileSizeMB}MB`, timeout: 5000 });
             } else {
                 pb.classList.add('error-bar');
@@ -907,6 +913,12 @@
                 cBtn.style.display = 'none'; // 继续下载时隐藏清理按钮
                 this.run();
             }
+        }
+
+        /** 释放下载过程中占用的内存（片段 Blob、初始化段、密钥缓存），不影响已写出的文件 */
+        releaseMemory() {
+            this.segmentBlobs = null; this.mapBlob = null; this.keyCache.clear();
+            this.segments = null; this.nativeStream = null; this.fileHandle = null;
         }
 
         manualCleanup() {
@@ -977,7 +989,11 @@
 
         panel.addEventListener('click', e => e.stopPropagation());
         ball.addEventListener('click', e => { e.stopPropagation(); if (dragging) return; panel.classList.toggle('open'); if (panel.classList.contains('open')) positionPanel(); });
-        document.addEventListener('click', e => { if (!panel.contains(e.target) && e.target !== ball) panel.classList.remove('open'); });
+        document.addEventListener('click', e => {
+            // 点在「悬浮媒体播放器」上不收起面板（面板是它联动弹出的）
+            if (e.target && e.target.closest && e.target.closest('[data-mf-float-player]')) return;
+            if (!panel.contains(e.target) && e.target !== ball) panel.classList.remove('open');
+        });
 
         function positionPanel() {
             const br = ball.getBoundingClientRect(), pw = panel.getBoundingClientRect().width, ph = panel.getBoundingClientRect().height;
@@ -1023,6 +1039,27 @@
             if (isSniffingActive() && url?.includes('.m3u8')) { ui.setUrl(url); ui.showBall(); }
             return origOpen.apply(this, arguments);
         };
+
+        // ===== 联动悬浮媒体播放器：设置链接并把面板弹在悬浮窗正下方 =====
+        document.documentElement.setAttribute('data-m3u8dl', '1');
+        const placeUnder = (d) => {
+            const panel = ui.panel;
+            const pw = panel.getBoundingClientRect().width;
+            const left = Math.max(8, Math.min(d.left + d.width / 2 - pw / 2, window.innerWidth - pw - 8));
+            panel.style.left = left + 'px'; panel.style.right = 'auto';
+            panel.style.top = d.top + 'px';
+            panel.style.maxHeight = Math.max(160, window.innerHeight - d.top - 12) + 'px';
+        };
+        const parseDetail = (e) => { try { return JSON.parse(e.detail) || {}; } catch (_) { return {}; } };
+        window.addEventListener('m3u8dl:open', (e) => {
+            const d = parseDetail(e);
+            if (d.url) ui.setUrl(d.url);
+            ui.showBall();
+            ui.panel.classList.add('open');
+            placeUnder(d);
+        });
+        window.addEventListener('m3u8dl:reposition', (e) => { if (ui.panel.classList.contains('open')) placeUnder(parseDetail(e)); });
+        window.addEventListener('m3u8dl:close', () => ui.panel.classList.remove('open'));
 
         ui.panel.querySelector('#download-btn').addEventListener('click', () => {
             const url = ui.getUrl();
