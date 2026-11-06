@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         M3U8媒体下载器 (支持AES-128解密)
 // @namespace    https://github.com/520luo/js/m3u8-downloader
-// @version      26.11.06.4
+// @version      26.11.06.5
 // @description  智能嗅探链接,多线程下载,智能模式,大文件边下边存,小文件内存高速下载,支持解密AES-128,精美的UI
 // @icon         https://raw.githubusercontent.com/520LUO/icons/refs/heads/main/M3U8.png
 // @author       520LUO
@@ -733,39 +733,57 @@
             };
             updateProgress();
 
-            status.textContent = `📥 下载中 (${this.total} 片段，串行)`;
+            status.textContent = `📥 下载中 (${this.total} 片段，${this.concurrency} 并发，按序写盘)`;
 
-            for (let i = this.completed; i < this.segments.length; i++) {
-                if (this.paused) {
-                    cBtn.style.display = 'flex';
-                    status.textContent = '⏸️ 已暂停，点击 ▶ 继续';
-                    pBtn.disabled = false; dBtn.disabled = true;
-                    return;
-                }
-                const seg = this.segments[i];
-                let success = false;
-                while (!success && !this.paused) {
-                    let blob;
-                    try {
-                        blob = await downloadAndDecrypt(seg.url, this.url, this.abortController.signal, seg.key, this.keyCache, i, MAX_RETRIES);
-                    } catch (err) {
-                        if (err.message === 'aborted') return;
-                        status.textContent = `🔄 片段 ${i+1} 重试中...`;
-                        await new Promise(r => setTimeout(r, 1000));
-                        continue;
+            // 并发下载 + 按序写盘：下载最多领先写盘 concurrency*2 个片段，内存占用有上限
+            const total = this.segments.length, signal = this.abortController.signal;
+            const maxAhead = this.concurrency * 2;
+            const sleep = ms => new Promise(r => setTimeout(r, ms));
+            const ready = new Map();
+            let nextFetch = this.completed, nextWrite = this.completed, fatal = null;
+
+            const worker = async () => {
+                while (!fatal && !this.paused && nextFetch < total) {
+                    if (nextFetch - nextWrite >= maxAhead) { await sleep(40); continue; }
+                    const i = nextFetch++, seg = this.segments[i];
+                    for (;;) {
+                        if (fatal || this.paused) return;
+                        try {
+                            ready.set(i, await downloadAndDecrypt(seg.url, this.url, signal, seg.key, this.keyCache, i, MAX_RETRIES));
+                            break;
+                        } catch (err) {
+                            if (err.message === 'aborted') return;
+                            status.textContent = `🔄 片段 ${i + 1} 重试中...`;
+                            await sleep(1000);
+                        }
                     }
-                    if (this.paused) return;
-                    try {
-                        await this.writable.write(blob);
-                    } catch (err) {
-                        // 写入失败（权限 / 空间 / 句柄失效）重新下载没有意义，直接报出真实原因
-                        const e = new Error(`写入文件失败（片段 ${i+1}/${this.total}）：${err && err.message || err}`);
+                }
+            };
+            const writer = async () => {
+                while (!fatal && !this.paused && nextWrite < total) {
+                    const blob = ready.get(nextWrite);
+                    if (!blob) { await sleep(25); continue; }
+                    ready.delete(nextWrite);
+                    try { await this.writable.write(blob); }
+                    catch (err) {
+                        // 写入失败重新下载没有意义，直接报出真实原因
+                        const e = new Error(`写入文件失败（片段 ${nextWrite + 1}/${total}）：${err && err.message || err}`);
                         e.name = (err && err.name) || 'WriteError';
-                        throw e;
+                        fatal = e; return;
                     }
-                    this.bytes += blob.size; this.completed++; updateProgress();
-                    success = true;
+                    this.bytes += blob.size; this.completed++; nextWrite++; updateProgress();
                 }
+            };
+            const workers = [];
+            for (let w = 0; w < this.concurrency; w++) workers.push(worker());
+            await Promise.all([...workers, writer()]);
+            ready.clear();
+            if (fatal) throw fatal;
+            if (this.paused) {
+                cBtn.style.display = 'flex';
+                status.textContent = '⏸️ 已暂停，点击 ▶ 继续';
+                pBtn.disabled = false; dBtn.disabled = true;
+                return;
             }
 
             await this.writable.close();
