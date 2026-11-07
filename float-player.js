@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         悬浮媒体播放器
 // @namespace    https://github.com/520luo/js/float-player
-// @version      26.11.06.23
+// @version      26.11.07
 // @description  识别到媒体后自动在顶部悬浮播放器（默认暂停，可点 ✕ 关闭）；油猴菜单可开关「自动悬浮播放器」「固定悬浮窗」；可联动 M3U8 下载器
 // @icon         https://raw.githubusercontent.com/520LUO/icons/refs/heads/main/floatplayer.png
 // @author       520LUO
@@ -255,7 +255,7 @@
     }
     menuIds = [];
     try {
-      const id = GM_registerMenuCommand(autoFloat ? '✅ 自动悬浮播放器-ON' : '🚫 自动悬浮播放器-OFF', () => {
+      const id = GM_registerMenuCommand(autoFloat ? '✅ 悬浮播放器已开启-ON' : '🚫 悬浮播器放已关闭-OFF', () => {
         autoFloat = !autoFloat;
         try { if (typeof GM_setValue === 'function') GM_setValue(AUTO_KEY, autoFloat); } catch (_) {}
         registerMenu();
@@ -263,7 +263,7 @@
         if (autoFloat) maybeAutoOpen();
       });
       if (id !== undefined) menuIds.push(id);
-      const id2 = GM_registerMenuCommand(fixedMode ? '📌 固定悬浮窗-ON' : '🖐 固定悬浮窗-OFF（可拖动 / 捏合）', () => {
+      const id2 = GM_registerMenuCommand(fixedMode ? '📌 固定悬浮窗已开启-ON' : '🖐 固定悬浮窗已关闭-OFF（可拖动 / 捏合）', () => {
         fixedMode = !fixedMode;
         try { if (typeof GM_setValue === 'function') GM_setValue(FIXED_KEY, fixedMode); } catch (_) {}
         if (fixedMode) { freeView.x = 0; freeView.y = 0; freeView.s = 1; }
@@ -272,7 +272,7 @@
         if (P) P.applyLayout();
       });
       if (id2 !== undefined) menuIds.push(id2);
-      const id3 = GM_registerMenuCommand(debugOn ? '🐞 调试-ON' : '🐞 调试-OFF', () => {
+      const id3 = GM_registerMenuCommand(debugOn ? '🐞 调试已开启-ON' : '🐞 调试已关闭-OFF', () => {
         debugOn = !debugOn;
         try { if (typeof GM_setValue === 'function') GM_setValue(DEBUG_KEY, debugOn); } catch (_) {}
         if (!debugOn) plLog.length = 0;
