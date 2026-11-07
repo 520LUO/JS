@@ -1,8 +1,8 @@
 // ==UserScript==
-// @name         悬浮媒体播放器
+// @name         悬浮媒体播放器 (iOS 玻璃质感)
 // @namespace    https://github.com/520luo/js/float-player
-// @version      26.11.06.18
-// @description  自动在顶部悬浮播放器（默认暂停，可点 ✕ 关闭）；油猴菜单可开关「自动悬浮播放器」「固定悬浮窗」；可联动 M3U8 下载器
+// @version      26.11.06.19
+// @description  识别到页面里的 M3U8 / MP4 / WebM 后，自动在顶部悬浮出 iOS 玻璃质感播放器（默认暂停，可点 ✕ 关闭）；油猴菜单可开关「自动悬浮播放器」「固定悬浮窗」；可联动 M3U8 下载器
 // @icon         https://raw.githubusercontent.com/520LUO/icons/refs/heads/main/player.png
 // @author       520LUO
 // @match        *://*/*
@@ -1642,14 +1642,37 @@
 
     function startHls(H, it, mode) {
       destroyHls();
-      const hls = new H({ enableWorker: true, maxBufferLength: 40, loader: makeLoader(H, mode, it.ref) });
+      // GM 模式关闭 worker：GM 给的 ArrayBuffer 可能是桥接对象，转交 worker（transfer）失败时 hls.js 不会报错，只会一直转圈
+      const hls = new H({ enableWorker: mode !== 'gm', maxBufferLength: 40, loader: makeLoader(H, mode, it.ref) });
       me.hls = hls;
       hls.on(H.Events.MANIFEST_PARSED, () => { if (menu.classList.contains('iosgp-menu-open')) renderMenu(); });
       hls.loadSource(it.url); hls.attachMedia(video);
       let retry = 0, nonFatal = 0;
-      hls.on(H.Events.ERROR, (_, d) => {
+      // 卡住诊断：统计各阶段进度，转圈超过 12 秒就把状态显示出来（不依赖调试开关）
+      const T = { man: 0, lvl: 0, fl: 0, fd: 0, ba: 0, errs: [], codecs: '' };
+      const E = H.Events;
+      hls.on(E.MANIFEST_LOADED, () => T.man++);
+      hls.on(E.LEVEL_LOADED, () => T.lvl++);
+      hls.on(E.FRAG_LOADING, () => T.fl++);
+      hls.on(E.FRAG_LOADED, () => T.fd++);
+      hls.on(E.BUFFER_APPENDED, () => T.ba++);
+      hls.on(E.BUFFER_CODECS, (_, d) => { try { T.codecs = Object.keys(d).map((k) => (d[k] && d[k].codec) || '').filter(Boolean).join('+'); } catch (_) {} });
+      const report = (n) => {
+        if (me.hls !== hls || me.closed || !spin.classList.contains('iosgp-show')) return;
+        const msg = `卡住：清单${T.man} 子清单${T.lvl} 分片请求${T.fl}/完成${T.fd}/入缓冲${T.ba} 编码${T.codecs || '?'} rs${video.readyState}${video.error ? ' vErr' + video.error.code : ''} ${T.errs.slice(-3).join(',') || '无错误'}`;
+        dbg(msg); toast(msg, 9000);
+        if (n < 2) setTimeout(() => report(n + 1), 18000);
+      };
+      setTimeout(() => report(1), 12000);
+      hls.on(E.ERROR, (_, d) => {
         if (me.hls !== hls) return;
+        if (d.details && !T.errs.includes(d.details)) T.errs.push(d.details);
         if (!d.fatal) {
+          if (d.details === 'bufferAddCodecError' || d.details === 'bufferIncompatibleCodecsError') {
+            spin.classList.remove('iosgp-show');
+            toast('该流的编码当前 WebView 的 MSE 不支持（' + (d.mimeType || T.codecs || '未知编码') + '），hls.js 无法播放', 6000);
+            return;
+          }
           const k = d.details;
           if (k === 'fragParsingError' || k === 'bufferAppendError' || k === 'fragDecryptError' || k === 'fragLoadError' || k === 'levelLoadError') {
             nonFatal++;
