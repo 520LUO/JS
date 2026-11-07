@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         悬浮媒体播放器 (iOS 玻璃质感)
 // @namespace    https://github.com/520luo/js/float-player
-// @version      26.11.06.22
+// @version      26.11.06.23
 // @description  识别到页面里的 M3U8 / MP4 / WebM 后，自动在顶部悬浮出 iOS 玻璃质感播放器（默认暂停，可点 ✕ 关闭）；油猴菜单可开关「自动悬浮播放器」「固定悬浮窗」；可联动 M3U8 下载器
 // @icon         https://raw.githubusercontent.com/520LUO/icons/refs/heads/main/player.png
 // @author       520LUO
@@ -619,6 +619,10 @@
                 if (isBuf) dbg(`GM 分片 ${(data.byteLength / 1024) | 0}KB  头 ${hex(data, 4)}  (${gmBinMode})`);
                 stats.loading.first = stats.loading.start + 1; stats.loading.end = Math.max(stats.loading.first, nowMs());
                 stats.loaded = stats.total = isBuf ? data.byteLength : String(data).length;
+                stats.bwEstimate = (stats.total * 8000) / Math.max(1, stats.loading.end - stats.loading.first);
+                // 关键：hls.js 的分片数据是经由 onProgress 交给解封装器的（onSuccess 之后只做 flush）。
+                // 默认 XHR loader 在 onSuccess 之前会先调一次 onProgress(stats, context, data, xhr)，自定义 loader 必须照做，否则分片「加载完成」但永远不会被解析
+                if (callbacks.onProgress) { try { callbacks.onProgress(stats, context, data, r); } catch (e) { dbg('onProgress 异常：' + (e && e.message)); } }
                 callbacks.onSuccess({ url: r.finalUrl || context.url, data, code: r.status }, stats, context, r);
               },
               onerror: () => { dbg('GM 网络错误 ' + context.url.split('/').pop().slice(0, 30)); fail('err', { code: 0, text: 'GM network error' }); },
