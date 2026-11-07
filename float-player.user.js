@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         悬浮媒体播放器 (iOS 玻璃质感)
 // @namespace    https://github.com/520luo/js/float-player
-// @version      26.11.06.11
+// @version      26.11.06.12
 // @description  识别到页面里的 M3U8 / MP4 / WebM 后，自动在顶部悬浮出 iOS 玻璃质感播放器（默认暂停，可点 ✕ 关闭）；油猴菜单可开关「自动悬浮播放器」「固定悬浮窗」；可联动 M3U8 下载器
 // @icon         https://raw.githubusercontent.com/520LUO/icons/refs/heads/main/player.png
 // @author       520LUO
@@ -305,15 +305,7 @@
   const hasGM = () => typeof GM_xmlhttpRequest === 'function';
   // 来源 iframe 或流地址与顶层不同源：在顶层 CORS / Referer 校验大概率不通，直接走 GM
   // （探测时长走的是 GM 请求，所以「能拿到时长」不代表页面里的 XHR 也能拉到分片）
-  // 各流域名上上次成功过的网络层：同域名的源直接用，不必再试错
-  const modeMemo = new Map(); // origin -> 'native' | 'gm'
-  // 播放用的初始网络层：来自跨域 iframe 的流需要带 iframe 的 Referer / Origin，原生 XHR 往往被拦或被挂起，直接 GM；其余先走原生（快）
-  const firstMode = (it) => {
-    const m = modeMemo.get(originOf(it.url));
-    if (m && (m !== 'gm' || hasGM())) return m;
-    const b = it.ref ? originOf(it.ref) : '';
-    return hasGM() && b && b !== location.origin ? 'gm' : 'native';
-  };
+  // 播放用的网络层：跨域（流地址或来源页与当前页面不同源）用 GM_xmlhttpRequest（可带来源页 Referer、不受 CORS 限制），同源用原生 XHR
   const needGM = (it) => {
     if (!hasGM() || !it) return false;
     const a = originOf(it.url), b = it.ref ? originOf(it.ref) : '';
@@ -1559,14 +1551,13 @@
       destroyHls();
       triedModes.add(mode);
       const hls = new H({ enableWorker: true, maxBufferLength: 40, loader: makeLoader(H, mode, it.ref) });
-      const memoKey = originOf(it.url);
       let gotFrag = false, wd = 0;
       const stopWd = () => { clearTimeout(wd); wd = 0; };
       me.hls = hls;
-      // 切换到另一种网络层（原生 XHR <-> GM_xmlhttpRequest）；每种只试一次
+      // 仅在「还没加载出任何分片」时，才会切换到另一种网络层（原生 XHR <-> GM_xmlhttpRequest）作为兜底；每种只试一次
       const switchMode = (why) => {
         const alt = mode === 'gm' ? 'native' : 'gm';
-        if (triedModes.has(alt) || (alt === 'gm' && !hasGM())) return false;
+        if (gotFrag || triedModes.has(alt) || (alt === 'gm' && !hasGM())) return false; // 视频已加载出来：不再切换
         triedModes.add(alt); stopWd();
         const wasPlaying = !video.paused;
         startTime = video.currentTime || startTime;
@@ -1574,7 +1565,7 @@
         setTimeout(() => { if (me.closed || me.current !== it || me.hls !== hls) return; startHls(H, it, alt); if (wasPlaying) video.play().catch(() => {}); }, 0);
         return true;
       };
-      hls.on(H.Events.FRAG_LOADED, () => { gotFrag = true; stopWd(); modeMemo.set(memoKey, mode); });
+      hls.on(H.Events.FRAG_LOADED, () => { gotFrag = true; stopWd(); });
       // 看门狗：请求被挂起（不报错也不返回）时，一直转圈——超时没拿到第一个分片就换网络层
       wd = setTimeout(() => { if (me.hls === hls && !gotFrag) switchMode('timeout'); }, mode === 'gm' ? 20000 : 8000);
       hls.loadSource(it.url); hls.attachMedia(video);
@@ -1583,7 +1574,7 @@
         if (me.hls !== hls) return;
         if (d.type === H.ErrorTypes.NETWORK_ERROR) {
           // 原生模式下 code=0（被 CORS 拦截 / 网络错误）或 401/403/451（防盗链）不等重试耗尽，立刻切；致命错误也切
-          const quick = mode !== 'gm' && !gotFrag && d.response && [0, 401, 403, 451].includes(d.response.code);
+          const quick = mode !== 'gm' && d.response && [0, 401, 403, 451].includes(d.response.code);
           if ((d.fatal || quick) && switchMode('error')) return;
         }
         if (!d.fatal) return;
@@ -1610,7 +1601,7 @@
       const H = await loadHls(); // hls.js 懒加载：真要播 HLS 时才加载
       if (seq !== loadSeq || me.closed) return;
       if (H && H.isSupported && H.isSupported()) {
-        startHls(H, it, firstMode(it));
+        startHls(H, it, needGM(it) ? 'gm' : 'native');
       } else if (video.canPlayType('application/vnd.apple.mpegurl')) {
         triedNative = true; video.src = it.url;
       } else {
