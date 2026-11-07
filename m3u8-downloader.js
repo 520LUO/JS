@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         M3U8媒体下载器 (支持AES-128解密)
 // @namespace    https://github.com/520luo/js/m3u8-downloader
-// @version      26.11.06.8
-// @description  智能嗅探链接,多线程下载,智能模式,大文件边下边存,小文件内存高速下载,支持解密AES-128,精美的UI
+// @version      26.11.07
+// @description  智能嗅探媒体链接,多线程下载,智能模式,大文件边下边存,小文件内存高速下载,支持解密AES-128,精美的UI
 // @icon         https://raw.githubusercontent.com/520LUO/icons/refs/heads/main/M3U8.png
 // @author       520LUO
 // @match        *://*/*
