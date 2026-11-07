@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         悬浮媒体播放器 (iOS 玻璃质感)
 // @namespace    https://github.com/520luo/js/float-player
-// @version      26.11.06.17
+// @version      26.11.06.18
 // @description  识别到页面里的 M3U8 / MP4 / WebM 后，自动在顶部悬浮出 iOS 玻璃质感播放器（默认暂停，可点 ✕ 关闭）；油猴菜单可开关「自动悬浮播放器」「固定悬浮窗」；可联动 M3U8 下载器
 // @icon         https://raw.githubusercontent.com/520LUO/icons/refs/heads/main/player.png
 // @author       520LUO
@@ -534,7 +534,8 @@
           return;
         }
         let range;
-        if (context.rangeStart != null && context.rangeEnd != null) range = `bytes=${context.rangeStart}-${context.rangeEnd - 1}`;
+        // hls.js 默认 rangeStart/rangeEnd 都是 0，只有 rangeEnd 为真且大于起点才是真正的字节范围（否则会发出非法的 bytes=0--1，被严格的服务器 416 / 400）
+        if (Number.isFinite(context.rangeStart) && Number.isFinite(context.rangeEnd) && context.rangeEnd > context.rangeStart) range = `bytes=${context.rangeStart}-${context.rangeEnd - 1}`;
         const tmo = (config && config.timeout) || 20000;
         const wdMs = Math.min(tmo, 25000) + 2000;
         this._pending = true;
