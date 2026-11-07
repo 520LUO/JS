@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         万能网页限制解除
 // @namespace    https://github.com/520luo/js/restriction-lifted.js
-// @version      26.11.07
+// @version      26.11.07.1
 // @description  解除网页的复制、右键、文本选择、粘贴、拖拽及部分键盘限制，可通过脚本菜单随时开关
 // @author       520LUO
 // @match        *://*/*
@@ -9,6 +9,7 @@
 // @grant        GM_registerMenuCommand
 // @grant        GM_getValue
 // @grant        GM_setValue
+// @grant        GM_unregisterMenuCommand
 // @icon         https://raw.githubusercontent.com/520LUO/icons/refs/heads/main/wnjc.png
 // @run-at       document-start
 // ==/UserScript==
@@ -185,19 +186,34 @@
     }
 
     // ==================== 脚本菜单 ====================
-    function registerMenuCommands() {
+    // 菜单中始终只注册一个命令：显示当前状态，点击后切换到相反状态。
+    let menuCommandId = null;
+
+    function registerToggleMenu() {
         if (typeof GM_registerMenuCommand !== 'function') {
             console.warn('[网页限制解除] 当前脚本管理器未提供 GM_registerMenuCommand，菜单命令不可用。');
             return;
         }
 
-        GM_registerMenuCommand('✅解除网页限制-ON', () => setEnabled(true));
-        GM_registerMenuCommand('🚫解除网页限制-OFF', () => setEnabled(false));
+        // 先移除旧菜单项，避免 ON/OFF 同时出现或重复注册。
+        if (menuCommandId !== null && typeof GM_unregisterMenuCommand === 'function') {
+            try {
+                GM_unregisterMenuCommand(menuCommandId);
+            } catch (error) {
+                console.warn('[网页限制解除] 更新菜单命令失败：', error);
+            }
+        }
+
+        const label = enabled ? '✅解除网页限制-ON' : '🚫解除网页限制-OFF';
+        menuCommandId = GM_registerMenuCommand(label, () => {
+            setEnabled(!enabled);
+            registerToggleMenu();
+        });
     }
 
     // ==================== 启动 ====================
     function init() {
-        registerMenuCommands();
+        registerToggleMenu();
 
         // document-start 时 head 可能尚未创建，等 html 可用后再注入。
         if (document.documentElement) {
