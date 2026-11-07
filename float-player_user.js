@@ -1,8 +1,8 @@
 // ==UserScript==
-// @name         悬浮媒体播放器 (iOS 玻璃质感)
+// @name         悬浮媒体播放器
 // @namespace    https://github.com/520luo/js/float-player
 // @version      26.11.06.18
-// @description  识别到页面里的 M3U8 / MP4 / WebM 后，自动在顶部悬浮出 iOS 玻璃质感播放器（默认暂停，可点 ✕ 关闭）；油猴菜单可开关「自动悬浮播放器」「固定悬浮窗」；可联动 M3U8 下载器
+// @description  自动在顶部悬浮播放器（默认暂停，可点 ✕ 关闭）；油猴菜单可开关「自动悬浮播放器」「固定悬浮窗」；可联动 M3U8 下载器
 // @icon         https://raw.githubusercontent.com/520LUO/icons/refs/heads/main/player.png
 // @author       520LUO
 // @match        *://*/*
