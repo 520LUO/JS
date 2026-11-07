@@ -2,202 +2,216 @@
 // @name         万能网页限制解除
 // @namespace    https://github.com/520luo/js/restriction-lifted.js
 // @version      26.11.07
-// @description  解除网页的复制、右键、文本选择、粘贴、拖拽、键盘等限制，支持动态内容
+// @description  解除网页的复制、右键、文本选择、粘贴、拖拽及部分键盘限制，可通过脚本菜单随时开关
 // @author       520LUO
 // @match        *://*/*
-// @license MIT
-// @grant        none
+// @license      MIT
+// @grant        GM_registerMenuCommand
+// @grant        GM_getValue
+// @grant        GM_setValue
 // @icon         https://raw.githubusercontent.com/520LUO/icons/refs/heads/main/wnjc.png
 // @run-at       document-start
 // ==/UserScript==
 
-(function() {
+(function () {
     'use strict';
 
-    // ========== 可配置项 ==========
-    const CONFIG = {
-        enableRightClick: true,      // 启用右键菜单
-        enableSelection: true,       // 允许文本选择
-        enableCopy: true,            // 允许复制
-        enablePaste: true,           // 允许粘贴
-        enableCut: true,             // 允许剪切
-        enableDrag: true,            // 允许拖拽
-        enableKeyboard: true,        // 解除键盘限制（如F12、Ctrl+U等）
-        removeOnAttributes: true,    // 移除元素上的on*事件属性（如oncontextmenu）
-        removeUnselectable: true,    // 移除unselectable属性
-        fixUserSelectCSS: true,      // 覆盖user-select样式
-        watchDynamicDOM: true        // 监视动态插入的元素
-    };
+    // ==================== 配置 ====================
+    const CONFIG = Object.freeze({
+        enableRightClick: true,
+        enableSelection: true,
+        enableCopy: true,
+        enablePaste: true,
+        enableCut: true,
+        enableDrag: true,
+        enableKeyboard: true,
+        fixUserSelectCSS: true,
+        watchStyleRemoval: true
+    });
 
-    // 需要阻止传播的事件列表（捕获阶段）
-    const BLOCKED_EVENTS = [];
-    if (CONFIG.enableRightClick) BLOCKED_EVENTS.push('contextmenu');
-    if (CONFIG.enableSelection) BLOCKED_EVENTS.push('selectstart');
-    if (CONFIG.enableCopy) BLOCKED_EVENTS.push('copy');
-    if (CONFIG.enablePaste) BLOCKED_EVENTS.push('paste');
-    if (CONFIG.enableCut) BLOCKED_EVENTS.push('cut');
-    if (CONFIG.enableDrag) BLOCKED_EVENTS.push('dragstart');
+    const STORAGE_KEY = 'restriction-lifted.enabled';
+    const STYLE_ID = 'restriction-lifted-override-style';
 
-    // 需要移除的on*属性名
-    const ON_ATTRS = [
-        'oncontextmenu', 'onselectstart', 'oncopy', 'onpaste', 'oncut',
-        'ondragstart', 'ondrag', 'ondragover', 'ondrop',
-        'onkeydown', 'onkeyup', 'onkeypress',
-        'onmousedown', 'onmouseup'
-    ];
+    // 默认开启；用户在菜单中修改后会跨页面刷新保存。
+    let enabled = loadEnabled();
 
-    // ========== 核心功能 ==========
+    // ==================== 状态持久化 ====================
+    function loadEnabled() {
+        try {
+            if (typeof GM_getValue === 'function') {
+                const value = GM_getValue(STORAGE_KEY, true);
+                if (typeof value === 'boolean') return value;
+            }
+        } catch (error) {
+            console.warn('[网页限制解除] GM_getValue 读取失败：', error);
+        }
 
-    // 1. 通过事件捕获阶段阻止所有相关事件监听器执行
-    function blockEvents() {
-        BLOCKED_EVENTS.forEach(eventType => {
-            document.addEventListener(eventType, function(e) {
-                e.stopImmediatePropagation(); // 阻止该元素上的其他监听器
-                // 注意：不调用 e.preventDefault()，以保留浏览器的默认行为
-            }, true); // 捕获阶段
-        });
+        try {
+            const value = localStorage.getItem(STORAGE_KEY);
+            if (value === 'true') return true;
+            if (value === 'false') return false;
+        } catch (_) {
+            // 某些页面可能禁止访问 localStorage，忽略并使用默认值。
+        }
+        return true;
+    }
 
-        // 键盘限制：允许F12、Ctrl+Shift+I、Ctrl+U、Ctrl+S等
-        if (CONFIG.enableKeyboard) {
-            document.addEventListener('keydown', function(e) {
-                // 常见开发者工具快捷键
-                const key = e.key;
-                const ctrl = e.ctrlKey, shift = e.shiftKey;
-                if (
-                    key === 'F12' ||
-                    (ctrl && shift && (key === 'I' || key === 'C' || key === 'J')) ||
-                    (ctrl && (key === 'u' || key === 'U' || key === 's' || key === 'S' || key === 'p' || key === 'P'))
-                ) {
-                    e.stopImmediatePropagation();
-                    // 不阻止默认，允许弹出开发者工具/保存等
-                }
+    function saveEnabled(value) {
+        try {
+            if (typeof GM_setValue === 'function') {
+                GM_setValue(STORAGE_KEY, value);
+                return;
+            }
+        } catch (error) {
+            console.warn('[网页限制解除] GM_setValue 保存失败：', error);
+        }
+
+        try {
+            localStorage.setItem(STORAGE_KEY, String(value));
+        } catch (error) {
+            console.warn('[网页限制解除] 设置无法持久化：', error);
+        }
+    }
+
+    // ==================== 样式控制 ====================
+    const OVERRIDE_CSS = `
+        html, body, body * {
+            -webkit-user-select: text !important;
+            -moz-user-select: text !important;
+            -ms-user-select: text !important;
+            user-select: text !important;
+            -webkit-touch-callout: default !important;
+        }
+    `;
+
+    function ensureStyle() {
+        if (!enabled || !CONFIG.fixUserSelectCSS || !document.documentElement) return;
+
+        let style = document.getElementById(STYLE_ID);
+        if (!style) {
+            style = document.createElement('style');
+            style.id = STYLE_ID;
+            style.textContent = OVERRIDE_CSS;
+            (document.head || document.documentElement).appendChild(style);
+        }
+    }
+
+    function removeStyle() {
+        const style = document.getElementById(STYLE_ID);
+        if (style) style.remove();
+    }
+
+    // ==================== 事件拦截 ====================
+    const blockedEvents = [];
+
+    if (CONFIG.enableRightClick) blockedEvents.push('contextmenu');
+    if (CONFIG.enableSelection) blockedEvents.push('selectstart');
+    if (CONFIG.enableCopy) blockedEvents.push('copy');
+    if (CONFIG.enablePaste) blockedEvents.push('paste');
+    if (CONFIG.enableCut) blockedEvents.push('cut');
+    if (CONFIG.enableDrag) {
+        blockedEvents.push('dragstart', 'drag', 'dragover', 'drop');
+    }
+
+    function interceptEvent(event) {
+        if (!enabled) return;
+
+        // 不调用 preventDefault：只阻止网页脚本取消浏览器原生操作，
+        // 保留浏览器自身的复制、粘贴、右键菜单等默认行为。
+        event.stopImmediatePropagation();
+    }
+
+    blockedEvents.forEach(type => {
+        document.addEventListener(type, interceptEvent, true);
+    });
+
+    // 仅拦截网页用于禁用开发者工具、查看源码、保存/打印的快捷键。
+    // 不拦截普通按键，避免影响输入框、快捷键和网页正常交互。
+    function isAllowedShortcut(event) {
+        const key = String(event.key || '').toLowerCase();
+        const ctrlOrMeta = event.ctrlKey || event.metaKey;
+
+        if (key === 'f12') return true;
+
+        if (ctrlOrMeta && event.shiftKey &&
+            ['i', 'c', 'j', 'k'].includes(key)) {
+            return true;
+        }
+
+        return ctrlOrMeta && ['u', 's', 'p'].includes(key);
+    }
+
+    if (CONFIG.enableKeyboard) {
+        ['keydown', 'keypress', 'keyup'].forEach(type => {
+            document.addEventListener(type, event => {
+                if (!enabled || !isAllowedShortcut(event)) return;
+                event.stopImmediatePropagation();
             }, true);
-        }
+        });
     }
 
-    // 2. 移除元素上的on*事件属性和unselectable
-    function cleanElement(el) {
-        if (!el || el.nodeType !== 1) return; // 只处理元素节点
+    // ==================== 动态 DOM / 样式维护 ====================
+    let observer = null;
 
-        // 移除on*属性
-        if (CONFIG.removeOnAttributes) {
-            ON_ATTRS.forEach(attr => {
-                if (el.hasAttribute(attr)) {
-                    el.removeAttribute(attr);
-                }
-            });
-        }
+    function startStyleObserver() {
+        if (!CONFIG.watchStyleRemoval || observer || !document.documentElement) return;
 
-        // 移除unselectable属性
-        if (CONFIG.removeUnselectable) {
-            const unselectable = el.getAttribute('unselectable');
-            if (unselectable === 'on' || unselectable === '') {
-                el.setAttribute('unselectable', 'off');
-            }
-        }
-
-        // 特殊处理body/html的onselectstart等（可能作为属性直接附加）
-        if (el.onselectstart !== undefined && CONFIG.enableSelection) {
-            el.onselectstart = null;
-        }
-        if (el.oncontextmenu !== undefined && CONFIG.enableRightClick) {
-            el.oncontextmenu = null;
-        }
-        if (el.oncopy !== undefined && CONFIG.enableCopy) {
-            el.oncopy = null;
-        }
-        if (el.onpaste !== undefined && CONFIG.enablePaste) {
-            el.onpaste = null;
-        }
-        if (el.oncut !== undefined && CONFIG.enableCut) {
-            el.oncut = null;
-        }
-        if (el.ondragstart !== undefined && CONFIG.enableDrag) {
-            el.ondragstart = null;
-        }
-    }
-
-    // 3. 添加全局CSS修复
-    function injectCSS() {
-        if (!CONFIG.fixUserSelectCSS) return;
-        const style = document.createElement('style');
-        style.textContent = `
-            *, *::before, *::after {
-                -webkit-user-select: auto !important;
-                -moz-user-select: auto !important;
-                -ms-user-select: auto !important;
-                user-select: auto !important;
-            }
-            html, body {
-                -webkit-user-select: auto !important;
-                -moz-user-select: auto !important;
-                -ms-user-select: auto !important;
-                user-select: auto !important;
-            }
-        `;
-        document.head.appendChild(style);
-    }
-
-    // 4. 遍历现有DOM进行清理
-    function cleanAllElements() {
-        const allElements = document.querySelectorAll('*');
-        allElements.forEach(cleanElement);
-        // 同时清理document和documentElement，body等
-        cleanElement(document.documentElement);
-        cleanElement(document.body);
-    }
-
-    // 5. 监视动态添加的内容
-    function watchDOM() {
-        if (!CONFIG.watchDynamicDOM) return;
-        const observer = new MutationObserver(mutations => {
-            let shouldCleanAll = false;
-            mutations.forEach(mutation => {
-                // 新增节点
-                mutation.addedNodes.forEach(node => {
-                    if (node.nodeType === 1) {
-                        cleanElement(node);
-                        // 递归处理子树
-                        const children = node.querySelectorAll('*');
-                        children.forEach(cleanElement);
-                    }
-                });
-                // 属性变化也可能添加禁止属性（如unselectable、on*）
-                if (mutation.type === 'attributes' && mutation.target.nodeType === 1) {
-                    cleanElement(mutation.target);
-                }
-                // 如果body或html本身被替换（极端情况），标记全量清理
-                if (mutation.target === document.body || mutation.target === document.documentElement) {
-                    shouldCleanAll = true;
-                }
-            });
-            if (shouldCleanAll) {
-                cleanAllElements();
+        observer = new MutationObserver(() => {
+            if (enabled && CONFIG.fixUserSelectCSS &&
+                !document.getElementById(STYLE_ID)) {
+                ensureStyle();
             }
         });
 
         observer.observe(document.documentElement, {
             childList: true,
-            subtree: true,
-            attributes: true,
-            attributeFilter: ['unselectable', 'oncontextmenu', 'onselectstart', 'oncopy', 'onpaste', 'oncut', 'ondragstart', 'style', 'class']
+            subtree: true
         });
     }
 
-    // ========== 启动 ==========
-    function init() {
-        blockEvents();
-        injectCSS();
+    function setEnabled(value, persist = true) {
+        enabled = Boolean(value);
 
-        // 当DOM可用时立即清理，也可在DOMContentLoaded后再次确保
-        if (document.readyState === 'loading') {
-            document.addEventListener('DOMContentLoaded', () => {
-                cleanAllElements();
-                watchDOM();
-            });
+        if (enabled) {
+            ensureStyle();
+            startStyleObserver();
         } else {
-            cleanAllElements();
-            watchDOM();
+            removeStyle();
+        }
+
+        if (persist) saveEnabled(enabled);
+
+        console.info(`[网页限制解除] ${enabled ? '已开启' : '已关闭'}`);
+    }
+
+    // ==================== 脚本菜单 ====================
+    function registerMenuCommands() {
+        if (typeof GM_registerMenuCommand !== 'function') {
+            console.warn('[网页限制解除] 当前脚本管理器未提供 GM_registerMenuCommand，菜单命令不可用。');
+            return;
+        }
+
+        GM_registerMenuCommand('✅解除网页限制-ON', () => setEnabled(true));
+        GM_registerMenuCommand('🚫解除网页限制-OFF', () => setEnabled(false));
+    }
+
+    // ==================== 启动 ====================
+    function init() {
+        registerMenuCommands();
+
+        // document-start 时 head 可能尚未创建，等 html 可用后再注入。
+        if (document.documentElement) {
+            setEnabled(enabled, false);
+        } else {
+            const bootstrapObserver = new MutationObserver(() => {
+                if (!document.documentElement) return;
+                bootstrapObserver.disconnect();
+                setEnabled(enabled, false);
+            });
+            bootstrapObserver.observe(document, {
+                childList: true,
+                subtree: true
+            });
         }
     }
 
