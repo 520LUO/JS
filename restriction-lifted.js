@@ -204,7 +204,7 @@
             }
         }
 
-        const label = enabled ? '✅解除网页限制-ON' : '🚫解除网页限制-OFF';
+        const label = enabled ? '✅解除网页限制状态-ON' : '🚫解除网页限制状态-OFF';
         menuCommandId = GM_registerMenuCommand(label, () => {
             setEnabled(!enabled);
             registerToggleMenu();
