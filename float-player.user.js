@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         悬浮媒体播放器 (iOS 玻璃质感)
 // @namespace    https://github.com/520luo/js/float-player
-// @version      26.11.06.9
+// @version      26.11.06.10
 // @description  识别到页面里的 M3U8 / MP4 / WebM 后，自动在顶部悬浮出 iOS 玻璃质感播放器（默认暂停，可点 ✕ 关闭）；油猴菜单可开关「自动悬浮播放器」「固定悬浮窗」；可联动 M3U8 下载器
 // @icon         https://raw.githubusercontent.com/520LUO/icons/refs/heads/main/player.png
 // @author       520LUO
@@ -305,6 +305,8 @@
   const hasGM = () => typeof GM_xmlhttpRequest === 'function';
   // 来源 iframe 或流地址与顶层不同源：在顶层 CORS / Referer 校验大概率不通，直接走 GM
   // （探测时长走的是 GM 请求，所以「能拿到时长」不代表页面里的 XHR 也能拉到分片）
+  // 各流域名上上次成功过的网络层：同域名的源直接用，不必再试错
+  const modeMemo = new Map(); // origin -> 'native' | 'gm'
   const needGM = (it) => {
     if (!hasGM() || !it) return false;
     const a = originOf(it.url), b = it.ref ? originOf(it.ref) : '';
@@ -476,7 +478,7 @@
         if (!isBuf) {
           const c = takeCache(context.url);
           if (c != null) {
-            stats.loading.first = stats.loading.end = Math.max(stats.loading.start + 1, nowMs());
+            stats.loading.first = stats.loading.start + 1; stats.loading.end = Math.max(stats.loading.first, nowMs());
             stats.loaded = stats.total = c.length;
             setTimeout(() => callbacks.onSuccess({ url: context.url, data: c }, stats, context, null), 0);
             return;
@@ -500,7 +502,7 @@
               let data = isBuf ? r.response : (r.responseText != null ? r.responseText : r.response);
               try { if (isBuf && data && data.byteLength === undefined && typeof data.arrayBuffer === 'function') data = await data.arrayBuffer(); } catch (_) { data = null; }
               if (data == null) { callbacks.onError({ code: r.status, text: 'empty response' }, context, r, stats); return; }
-              stats.loading.first = stats.loading.end = Math.max(stats.loading.start + 1, nowMs());
+              stats.loading.first = stats.loading.start + 1; stats.loading.end = Math.max(stats.loading.first, nowMs());
               stats.loaded = stats.total = isBuf ? (data.byteLength || 0) : String(data).length;
               callbacks.onSuccess({ url: r.finalUrl || context.url, data, code: r.status }, stats, context, r);
             } else callbacks.onError({ code: r.status, text: r.statusText || ('HTTP ' + r.status) }, context, r, stats);
@@ -913,8 +915,9 @@
 .iosgp-fs .iosgp-bottom { bottom: calc(56px + var(--fo) + env(safe-area-inset-bottom, 0px)); padding: 0 calc(16px + var(--fo) + env(safe-area-inset-right, 0px)) 0 calc(16px + var(--fo) + env(safe-area-inset-left, 0px)); }
 .iosgp-fs .iosgp-speed-pop { bottom: calc(56px + var(--fo) + env(safe-area-inset-bottom, 0px)); right: calc(12px + var(--fo) + env(safe-area-inset-right, 0px)); }
 .iosgp-fs .iosgp-toast { top: calc(56px + var(--fo)); }
-.iosgp-menu { max-height: 60vh; overflow-y: auto; }
-.iosgp-menu-src { display: block; width: 100%; text-align: left; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.iosgp-menu { max-height: 60vh; overflow-y: auto; overflow-x: hidden; overscroll-behavior: contain; box-sizing: border-box; max-width: min(280px, 80vw); }
+.iosgp-src-box { max-height: calc(150px * var(--iosgp-scale, 1)); overflow-y: auto; overflow-x: hidden; overscroll-behavior: contain; -webkit-overflow-scrolling: touch; }
+.iosgp-menu-src { display: block; width: 100%; min-width: 0; box-sizing: border-box; text-align: left; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; flex: none; }
 .iosgp-menu-src.iosgp-on { background: rgba(255,255,255,.22); }
 .iosgp-spin { position: absolute; left: 50%; top: 50%; width: 36px; height: 36px; margin: -18px 0 0 -18px; border-radius: 50%;
   border: 3px solid rgba(255,255,255,.25); border-top-color: #fff; animation: iosgp-spin .8s linear infinite; display: none; pointer-events: none; z-index: 3; }
@@ -1081,7 +1084,7 @@
     const qualityLabel = menuLabel('清晰度');
     const qualityBox = document.createElement('div');
     const sourceLabel = menuLabel('视频源');
-    const sourceBox = document.createElement('div');
+    const sourceBox = document.createElement('div'); sourceBox.className = 'iosgp-src-box';
     const menu = document.createElement('div'); menu.className = 'iosgp-menu';
     menu.append(downloadItem, copyItem, qualityLabel, qualityBox, sourceLabel, sourceBox);
     const menuWrap = document.createElement('div'); menuWrap.className = 'iosgp-menu-wrap';
@@ -1474,7 +1477,7 @@
       }
       // 视频源
       sourceBox.innerHTML = '';
-      const list = [...found.values()].sort((a, b) => b.t - a.t);
+      const list = [...found.values()].sort((a, b) => b.t - a.t).slice(0, 30);
       sourceLabel.style.display = sourceBox.style.display = list.length > 1 ? '' : 'none';
       list.forEach((it) => {
         const b = document.createElement('button');
@@ -1488,6 +1491,7 @@
       closeSpeed();
       renderMenu();
       menu.style.maxHeight = Math.max(120, wrapper.clientHeight - 64) + 'px';
+      menu.style.maxWidth = Math.max(150, Math.min(280, wrapper.clientWidth - 28)) + 'px'; // 不超出播放器宽度
       menu.classList.add('iosgp-menu-open');
       setTimeout(() => root.addEventListener('click', closeMenu), 0);
     }
@@ -1547,17 +1551,19 @@
     function startHls(H, it, mode) {
       destroyHls();
       triedModes.add(mode);
-      const hls = new H({ enableWorker: true, maxBufferLength: 40, loader: makeLoader(H, mode, it.ref) });
+      const hls = new H({ enableWorker: true, maxBufferLength: 40, capLevelToPlayerSize: true, loader: makeLoader(H, mode, it.ref) });
+      const memoKey = originOf(it.url);
+      hls.on(H.Events.FRAG_LOADED, () => { modeMemo.set(memoKey, mode); });
       me.hls = hls;
       hls.loadSource(it.url); hls.attachMedia(video);
       let retry = 0;
       hls.on(H.Events.ERROR, (_, d) => {
         if (me.hls !== hls) return;
         // 网络层失败：原生 XHR（多半是 CORS）与 GM_xmlhttpRequest（带来源页 Referer）互为后备，各试一次。
-        // 原生模式下 code=0（被 CORS 拦截 / 网络错误）不必等重试耗尽就立刻切，否则会一直转圈。
+        // 原生模式下 code=0（被 CORS 拦截 / 网络错误）或 401/403（防盗链）不必等重试耗尽就立刻切，否则会一直转圈。
         if (d.type === H.ErrorTypes.NETWORK_ERROR) {
           const alt = mode === 'gm' ? 'native' : 'gm';
-          const quick = mode !== 'gm' && d.response && d.response.code === 0;
+          const quick = mode !== 'gm' && d.response && [0, 401, 403, 451].includes(d.response.code);
           if ((d.fatal || quick) && !triedModes.has(alt) && (alt !== 'gm' || hasGM())) {
             const wasPlaying = !video.paused;
             startTime = video.currentTime || startTime;
@@ -1588,7 +1594,7 @@
       const H = await loadHls(); // hls.js 懒加载：真要播 HLS 时才加载
       if (seq !== loadSeq || me.closed) return;
       if (H && H.isSupported && H.isSupported()) {
-        startHls(H, it, needGM(it) ? 'gm' : 'native');
+        startHls(H, it, modeMemo.get(originOf(it.url)) || 'native');
       } else if (video.canPlayType('application/vnd.apple.mpegurl')) {
         triedNative = true; video.src = it.url;
       } else {
