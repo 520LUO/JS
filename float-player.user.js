@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         悬浮媒体播放器 (iOS 玻璃质感)
 // @namespace    https://github.com/520luo/js/float-player
-// @version      26.11.06.12
+// @version      26.11.06.14
 // @description  识别到页面里的 M3U8 / MP4 / WebM 后，自动在顶部悬浮出 iOS 玻璃质感播放器（默认暂停，可点 ✕ 关闭）；油猴菜单可开关「自动悬浮播放器」「固定悬浮窗」；可联动 M3U8 下载器
 // @icon         https://raw.githubusercontent.com/520LUO/icons/refs/heads/main/player.png
 // @author       520LUO
@@ -86,8 +86,22 @@
       const oldest = [...found.values()].sort((a, b) => a.t - b.t)[0];
       found.delete(oldest.url);
     }
+    if (type === 'hls') scheduleEnrich();
     refreshBall();
     maybeAutoOpen();
+  }
+
+  // 后台探测新发现的 HLS 播放列表（只拉文本）：识别主清单 / 子清单、记录时长，供选源与清晰度使用
+  let enrichTimer = 0;
+  function scheduleEnrich() {
+    clearTimeout(enrichTimer);
+    enrichTimer = setTimeout(async () => {
+      const todo = [...found.values()].filter((i) => i.type === 'hls' && i._dur === undefined && !i._probe && !dismissed.has(i.url)).sort((a, b) => b.t - a.t).slice(0, 6);
+      if (!todo.length) return;
+      await Promise.all(todo.map(probeDuration));
+      refreshBall();
+      if (found.size) scheduleEnrich(); // 还有没探测的，下一轮
+    }, 800);
   }
 
   // 响应头 Content-Type 嗅探：无后缀的播放列表 / 视频流
@@ -256,10 +270,11 @@
     let list = [...found.values()];
     if (excludeDismissed) list = list.filter((i) => !dismissed.has(i.url));
     if (!list.length) return null;
+    const lift = (it) => (it && it.type === 'hls' && parentOf(it.url)) || it; // 子清单 → 主清单（才有清晰度可选）
     const pv = [...document.querySelectorAll('video')].find((v) => !v.paused && v.currentSrc);
-    if (pv) { const it = list.find((i) => i.url === pv.currentSrc); if (it) return it; }
+    if (pv) { const it = list.find((i) => i.url === pv.currentSrc); if (it) return lift(it); }
     list.sort((a, b) => b.t - a.t);
-    return list.find((i) => i.type === 'hls') || list[0];
+    return lift(list.find((i) => i.type === 'hls') || list[0]);
   }
 
   function shortName(url) {
@@ -305,7 +320,7 @@
   const hasGM = () => typeof GM_xmlhttpRequest === 'function';
   // 来源 iframe 或流地址与顶层不同源：在顶层 CORS / Referer 校验大概率不通，直接走 GM
   // （探测时长走的是 GM 请求，所以「能拿到时长」不代表页面里的 XHR 也能拉到分片）
-  // 播放用的网络层：跨域（流地址或来源页与当前页面不同源）用 GM_xmlhttpRequest（可带来源页 Referer、不受 CORS 限制），同源用原生 XHR
+  // 播放用的网络层：同源用原生 XHR；跨域（流地址或来源页与当前页面不同源）先探测原生能否拉到播放列表，能就原生，不能才用 GM_xmlhttpRequest
   const needGM = (it) => {
     if (!hasGM() || !it) return false;
     const a = originOf(it.url), b = it.ref ? originOf(it.ref) : '';
@@ -410,10 +425,10 @@
       } catch (_) { resolve(null); }
     });
   }
-  async function nativeText(url) {
+  async function nativeText(url, ms) {
     if (!rawFetch) return null;
     const ac = typeof AbortController === 'function' ? new AbortController() : null;
-    const tm = setTimeout(() => { if (ac) ac.abort(); }, 6000);
+    const tm = setTimeout(() => { if (ac) ac.abort(); }, ms || 6000);
     try {
       const r = await rawFetch(url, ac ? { signal: ac.signal } : undefined);
       if (!r.ok) return null;
@@ -429,6 +444,14 @@
       } catch (_) {}
     }
     return null;
+  }
+
+  // 跨域流能否直接用原生请求：成功拿到播放列表 = 对方放行了 CORS，且接受页面自带的 Origin / Referer
+  async function canNative(it) {
+    if (it._native !== undefined) return it._native;
+    let ok = false;
+    try { const t = await nativeText(it.url, 3000); ok = !!t && /^\s*#EXTM3U/.test(t); } catch (_) { ok = false; }
+    return (it._native = ok);
   }
 
   function newStats() {
@@ -1459,24 +1482,42 @@
       downloadItem.disabled = false;
       downloadItem.querySelector('.iosgp-menu-label').textContent = '下载视频';
       copyItem.disabled = false;
-      // 清晰度（仅 HLS 多码率）
+      // 清晰度：① 多码率主清单（hls.levels）；② 没有主清单、每个清晰度各一个地址（同时长的 HLS 源）
       qualityBox.innerHTML = '';
       const hls = me.hls;
       const levels = hls && hls.levels && hls.levels.length > 1 ? hls.levels : null;
-      qualityLabel.style.display = qualityBox.style.display = levels ? '' : 'none';
+      let group = null;
+      if (!levels && cur.type === 'hls' && cur._dur != null) {
+        const alts = [...found.values()].filter((i) => i.type === 'hls' && i.url !== cur.url && !dismissed.has(i.url) && !hasParent(i) && i._dur != null && Math.abs(i._dur - cur._dur) <= 2);
+        if (alts.length) group = [cur, ...alts];
+      }
+      qualityLabel.style.display = qualityBox.style.display = (levels || group) ? '' : 'none';
       if (levels) {
-        const ids = [-1, ...levels.map((_, i) => i).sort((a, b) => (levels[b].height || 0) - (levels[a].height || 0))];
-        const grid = chipGrid(ids, (i) => i === -1 ? '自动' : (levels[i].height ? levels[i].height + 'p' : Math.round((levels[i].bitrate || 0) / 1000) + 'k'));
+        const base = levels.map((l) => (l.height ? l.height + 'p' : Math.round((l.bitrate || 0) / 1000) + 'k'));
+        const lab = base.map((x, i) => (base.filter((y) => y === x).length > 1 ? `${x}·${Math.round((levels[i].bitrate || 0) / 1000)}k` : x));
+        const ids = [-1, ...levels.map((_, i) => i).sort((a, b) => (levels[b].height || 0) - (levels[a].height || 0) || (levels[b].bitrate || 0) - (levels[a].bitrate || 0))];
+        const grid = chipGrid(ids, (i) => (i === -1 ? '自动' : lab[i]));
         grid.querySelectorAll('.iosgp-speed-chip').forEach((c) => {
           const i = parseInt(c.dataset.v, 10);
           c.classList.toggle('iosgp-speed-active', i === -1 ? hls.autoLevelEnabled : (!hls.autoLevelEnabled && hls.currentLevel === i));
           c.addEventListener('click', (e) => { e.stopPropagation(); hls.currentLevel = i; closeMenu(); });
         });
         qualityBox.appendChild(grid);
+      } else if (group) {
+        group.sort((x, y) => ((urlQuality(y.url) || {}).h || 0) - ((urlQuality(x.url) || {}).h || 0));
+        const names = group.map((g, i) => { const q = urlQuality(g.url); return q ? q.label : '源' + (i + 1); });
+        const grid = chipGrid(group.map((_, i) => i), (i) => names[i]);
+        grid.querySelectorAll('.iosgp-speed-chip').forEach((c) => {
+          const g = group[parseInt(c.dataset.v, 10)];
+          c.classList.toggle('iosgp-speed-active', g.url === cur.url);
+          c.addEventListener('click', (e) => { e.stopPropagation(); closeMenu(); if (g.url !== me.current.url) load(g, video.currentTime, !video.paused); });
+        });
+        qualityBox.appendChild(grid);
       }
-      // 视频源
+      // 视频源：不列主清单的子清单、也不重复列已进清晰度的源
       sourceBox.innerHTML = '';
-      const list = [...found.values()].sort((a, b) => b.t - a.t).slice(0, 30);
+      const grouped = new Set(group ? group.map((g) => g.url) : []);
+      const list = [...found.values()].filter((i) => !hasParent(i) && !grouped.has(i.url)).sort((a, b) => b.t - a.t).slice(0, 30);
       sourceLabel.style.display = sourceBox.style.display = list.length > 1 ? '' : 'none';
       list.forEach((it) => {
         const b = document.createElement('button');
@@ -1568,6 +1609,7 @@
       hls.on(H.Events.FRAG_LOADED, () => { gotFrag = true; stopWd(); });
       // 看门狗：请求被挂起（不报错也不返回）时，一直转圈——超时没拿到第一个分片就换网络层
       wd = setTimeout(() => { if (me.hls === hls && !gotFrag) switchMode('timeout'); }, mode === 'gm' ? 20000 : 8000);
+      hls.on(H.Events.MANIFEST_PARSED, () => { if (menu.classList.contains('iosgp-menu-open')) renderMenu(); });
       hls.loadSource(it.url); hls.attachMedia(video);
       let retry = 0;
       hls.on(H.Events.ERROR, (_, d) => {
@@ -1588,6 +1630,7 @@
     }
 
     async function load(it, resumeAt, autoplay) {
+      if (it.type === 'hls') { const par = parentOf(it.url); if (par) it = par; } // 加载主清单，清晰度才能选
       const seq = ++loadSeq;
       destroyHls();
       me.current = it; startTime = resumeAt || 0; triedNative = false; triedModes.clear();
@@ -1601,7 +1644,14 @@
       const H = await loadHls(); // hls.js 懒加载：真要播 HLS 时才加载
       if (seq !== loadSeq || me.closed) return;
       if (H && H.isSupported && H.isSupported()) {
-        startHls(H, it, needGM(it) ? 'gm' : 'native');
+        // 跨域流先探测原生是否可用（可用就不走更慢、更容易出问题的 GM）；同源直接原生
+        let mode = 'native';
+        if (needGM(it)) {
+          spin.classList.add('iosgp-show');
+          mode = (await canNative(it)) ? 'native' : 'gm';
+          if (seq !== loadSeq || me.closed) return;
+        }
+        startHls(H, it, mode);
       } else if (video.canPlayType('application/vnd.apple.mpegurl')) {
         triedNative = true; video.src = it.url;
       } else {
@@ -1672,6 +1722,41 @@
     return n;
   }
 
+  // 解析主清单里的各清晰度子清单（地址 + 分辨率 + 码率）
+  function parseVariants(text, base) {
+    const out = [], lines = text.split(/\r?\n/);
+    for (let i = 0; i < lines.length; i++) {
+      if (!/^#EXT-X-STREAM-INF/.test(lines[i])) continue;
+      const res = /RESOLUTION=(\d+)x(\d+)/i.exec(lines[i]), bw = /BANDWIDTH=(\d+)/i.exec(lines[i]);
+      for (let j = i + 1; j < lines.length; j++) {
+        const l = lines[j].trim();
+        if (l && l[0] !== '#') {
+          try { out.push({ url: new URL(l, base).href, w: res ? +res[1] : 0, h: res ? +res[2] : 0, bw: bw ? +bw[1] : 0 }); } catch (_) {}
+          break;
+        }
+      }
+    }
+    return out;
+  }
+  // 某个子清单属于哪个已识别的主清单（同一视频的不同清晰度，不该当成独立视频源）
+  function parentOf(url) {
+    for (const m of found.values()) {
+      if (m.url !== url && m._variants && m._variants.some((v) => v.url === url)) return m;
+    }
+    return null;
+  }
+  const hasParent = (i) => i.type === 'hls' && !!parentOf(i.url);
+  // 没有主清单、每个清晰度各一个地址时：从地址里认清晰度（1080p / 720 / 4k / hd ...）
+  function urlQuality(url) {
+    let d = url;
+    try { d = decodeURIComponent(new URL(url).pathname); } catch (_) {}
+    let m = /(?:^|[^a-z0-9])(2160|1440|1080|720|576|540|480|360|240)p?(?![a-z0-9])/i.exec(d);
+    if (m) return { label: m[1] + 'p', h: +m[1] };
+    m = /(?:^|[^a-z0-9])(4k|uhd|fhd|hd|sd|ld)(?![a-z0-9])/i.exec(d);
+    if (m) { const map = { '4k': 2160, uhd: 2160, fhd: 1080, hd: 720, sd: 480, ld: 360 }; return { label: m[1].toUpperCase(), h: map[m[1].toLowerCase()] }; }
+    return null;
+  }
+
   function firstVariant(text, base) {
     const lines = text.split(/\r?\n/);
     for (let i = 0; i < lines.length; i++) {
@@ -1697,6 +1782,7 @@
     if (!text || !/^\s*#EXTM3U/.test(text)) return null;
     playlistCache.set(it.url, { text, t: Date.now() });
     if (/#EXT-X-STREAM-INF/.test(text)) {
+      it._variants = parseVariants(text, it.url); // 记下这是主清单，以及它有哪些清晰度
       const sub = firstVariant(text, it.url);
       if (!sub) return null;
       const t2 = await fetchText(sub, it.ref, gm);
@@ -1740,7 +1826,7 @@
     if (list.length > 1) {
       await Promise.all(list.slice(0, 6).map(probeDuration));
       if (!autoFloat || P) return;
-      list = hlsList();
+      list = hlsList().filter((i) => !hasParent(i)); // 主清单的子清单不算独立视频
       const known = list.filter((i) => i._dur != null).map((i) => i._dur);
       const unknown = list.length - known.length; // 直播 / 探测失败 / 没探测的，各算一个
       if (list.length && distinctCount(known) + unknown === 1) openPlayer(list[0], { autoplay: false });
@@ -1797,7 +1883,7 @@
     if (!document.body) { document.addEventListener('DOMContentLoaded', refreshBall, { once: true }); return; }
     ensureBall();
     ball.style.display = (found.size && !P) ? 'flex' : 'none';
-    ballBadge.textContent = String(found.size);
+    ballBadge.textContent = String([...found.values()].filter((i) => !hasParent(i)).length || found.size);
   }
 
   // 单个直链文件的时长要等 <video> 元数据加载出来才知道：加载完再判断一次
