@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         悬浮媒体播放器 (iOS 玻璃质感)
 // @namespace    https://github.com/520luo/js/float-player
-// @version      26.11.06.14
+// @version      26.11.06.15
 // @description  识别到页面里的 M3U8 / MP4 / WebM 后，自动在顶部悬浮出 iOS 玻璃质感播放器（默认暂停，可点 ✕ 关闭）；油猴菜单可开关「自动悬浮播放器」「固定悬浮窗」；可联动 M3U8 下载器
 // @icon         https://raw.githubusercontent.com/520LUO/icons/refs/heads/main/player.png
 // @author       520LUO
@@ -1595,20 +1595,21 @@
       let gotFrag = false, wd = 0;
       const stopWd = () => { clearTimeout(wd); wd = 0; };
       me.hls = hls;
-      // 仅在「还没加载出任何分片」时，才会切换到另一种网络层（原生 XHR <-> GM_xmlhttpRequest）作为兜底；每种只试一次
-      const switchMode = (why) => {
-        const alt = mode === 'gm' ? 'native' : 'gm';
-        if (gotFrag || triedModes.has(alt) || (alt === 'gm' && !hasGM())) return false; // 视频已加载出来：不再切换
-        triedModes.add(alt); stopWd();
-        const wasPlaying = !video.paused;
+      // 唯一的兜底：跨域流探测到原生可用、用原生播放，结果在「还没出画面」时失败 / 挂起，才改用 GM，且只换一次。
+      // 其余情况（同源、探测失败直接走了 GM、已经加载出画面）一律不切换。
+      const canFallback = mode === 'native' && needGM(it) && hasGM();
+      const started = () => gotFrag || video.readyState >= 2 || video.currentTime > 0;
+      const switchMode = () => {
+        if (!canFallback || started() || triedModes.has('gm')) return false;
+        triedModes.add('gm'); stopWd();
         startTime = video.currentTime || startTime;
-        toast('线路较慢，正在切换加载方式…', 1800);
-        setTimeout(() => { if (me.closed || me.current !== it || me.hls !== hls) return; startHls(H, it, alt); if (wasPlaying) video.play().catch(() => {}); }, 0);
+        toast('原生加载失败，改用 GM 加载…', 1800);
+        setTimeout(() => { if (me.closed || me.current !== it || me.hls !== hls) return; startHls(H, it, 'gm'); }, 0);
         return true;
       };
-      hls.on(H.Events.FRAG_LOADED, () => { gotFrag = true; stopWd(); });
-      // 看门狗：请求被挂起（不报错也不返回）时，一直转圈——超时没拿到第一个分片就换网络层
-      wd = setTimeout(() => { if (me.hls === hls && !gotFrag) switchMode('timeout'); }, mode === 'gm' ? 20000 : 8000);
+      hls.on(H.Events.FRAG_LOADED, () => { gotFrag = true; stopWd(); it._mode = mode; }); // 记住能播的方式，同一个源再加载不重复探测
+      // 看门狗：请求被挂起（不报错也不返回）时一直转圈——超时还没出画面就换 GM
+      if (canFallback) wd = setTimeout(() => { if (me.hls === hls) switchMode(); }, 8000);
       hls.on(H.Events.MANIFEST_PARSED, () => { if (menu.classList.contains('iosgp-menu-open')) renderMenu(); });
       hls.loadSource(it.url); hls.attachMedia(video);
       let retry = 0;
@@ -1616,8 +1617,8 @@
         if (me.hls !== hls) return;
         if (d.type === H.ErrorTypes.NETWORK_ERROR) {
           // 原生模式下 code=0（被 CORS 拦截 / 网络错误）或 401/403/451（防盗链）不等重试耗尽，立刻切；致命错误也切
-          const quick = mode !== 'gm' && d.response && [0, 401, 403, 451].includes(d.response.code);
-          if ((d.fatal || quick) && switchMode('error')) return;
+          const quick = d.response && [0, 401, 403, 451].includes(d.response.code);
+          if ((d.fatal || quick) && switchMode()) return;
         }
         if (!d.fatal) return;
         stopWd();
@@ -1644,11 +1645,12 @@
       const H = await loadHls(); // hls.js 懒加载：真要播 HLS 时才加载
       if (seq !== loadSeq || me.closed) return;
       if (H && H.isSupported && H.isSupported()) {
-        // 跨域流先探测原生是否可用（可用就不走更慢、更容易出问题的 GM）；同源直接原生
-        let mode = 'native';
-        if (needGM(it)) {
+        // 同源：原生；跨域：先用 fetch 探测（最多 3 秒），成功就原生，失败直接 GM
+        // 已经播放成功过的源：沿用当时的方式，不再探测、不再切换
+        let mode = it._mode || 'native';
+        if (!it._mode && needGM(it)) {
           spin.classList.add('iosgp-show');
-          mode = (await canNative(it)) ? 'native' : 'gm';
+          mode = (await canNative(it)) ? 'native' : 'gm'; // 探测失败直接 GM
           if (seq !== loadSeq || me.closed) return;
         }
         startHls(H, it, mode);
