@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         悬浮媒体播放器 (iOS 玻璃质感)
 // @namespace    https://github.com/520luo/js/float-player
-// @version      26.11.06.15
+// @version      26.11.06.16
 // @description  识别到页面里的 M3U8 / MP4 / WebM 后，自动在顶部悬浮出 iOS 玻璃质感播放器（默认暂停，可点 ✕ 关闭）；油猴菜单可开关「自动悬浮播放器」「固定悬浮窗」；可联动 M3U8 下载器
 // @icon         https://raw.githubusercontent.com/520LUO/icons/refs/heads/main/player.png
 // @author       520LUO
@@ -318,9 +318,9 @@
    * 2. hls.js 懒加载 + 网络层（GM_xmlhttpRequest 加载器、播放列表缓存）
    * =======================================================*/
   const hasGM = () => typeof GM_xmlhttpRequest === 'function';
-  // 来源 iframe 或流地址与顶层不同源：在顶层 CORS / Referer 校验大概率不通，直接走 GM
-  // （探测时长走的是 GM 请求，所以「能拿到时长」不代表页面里的 XHR 也能拉到分片）
-  // 播放用的网络层：同源用原生 XHR；跨域（流地址或来源页与当前页面不同源）先探测原生能否拉到播放列表，能就原生，不能才用 GM_xmlhttpRequest
+  // 网络层选择规则（没有任何自动切换）：
+  //   流地址或来源页与当前页面不同源 → 一律走 GM_xmlhttpRequest（带来源页 Referer，绕过 CORS）；
+  //   同源 → 一律走原生 XHR / fetch。
   const needGM = (it) => {
     if (!hasGM() || !it) return false;
     const a = originOf(it.url), b = it.ref ? originOf(it.ref) : '';
@@ -405,7 +405,8 @@
 
   function gmReq(o) {
     const headers = {};
-    if (o.ref) { headers.Referer = o.ref; const org = originOf(o.ref); if (org) headers.Origin = org; }
+    // 只带 Referer：Origin 会让做了 CORS 白名单校验的（本来不设盗链的）源直接返回 403
+    if (o.ref) headers.Referer = o.ref;
     if (o.range) headers.Range = o.range;
     const req = {
       method: 'GET', url: o.url, headers, timeout: o.timeout || 15000,
@@ -416,13 +417,16 @@
   }
   function gmText(url, ref) {
     return new Promise((resolve) => {
+      let done = false;
+      const fin = (v) => { if (done) return; done = true; clearTimeout(wd); resolve(v); };
+      const wd = setTimeout(() => fin(null), 9000); // GM 偶发既不 onload 也不 onerror
       try {
         gmReq({
           url, ref, timeout: 8000,
-          onload: (r) => resolve(r.status >= 200 && r.status < 300 ? (r.responseText != null ? r.responseText : (typeof r.response === 'string' ? r.response : null)) : null),
-          onerror: () => resolve(null), ontimeout: () => resolve(null)
+          onload: (r) => fin(r.status >= 200 && r.status < 300 ? (r.responseText != null ? r.responseText : (typeof r.response === 'string' ? r.response : null)) : null),
+          onerror: () => fin(null), ontimeout: () => fin(null)
         });
-      } catch (_) { resolve(null); }
+      } catch (_) { fin(null); }
     });
   }
   async function nativeText(url, ms) {
@@ -430,28 +434,25 @@
     const ac = typeof AbortController === 'function' ? new AbortController() : null;
     const tm = setTimeout(() => { if (ac) ac.abort(); }, ms || 6000);
     try {
-      const r = await rawFetch(url, ac ? { signal: ac.signal } : undefined);
+      const r = await rawFetch.call(window, url, ac ? { signal: ac.signal } : undefined);
       if (!r.ok) return null;
       return await r.text();
-    } finally { clearTimeout(tm); }
+    } catch (_) { return null; } finally { clearTimeout(tm); }
   }
-  async function fetchText(url, ref, preferGM) {
-    const order = hasGM() ? (preferGM ? ['gm', 'fetch'] : ['fetch', 'gm']) : ['fetch'];
-    for (const m of order) {
-      try {
-        const t = m === 'gm' ? await gmText(url, ref) : await nativeText(url);
-        if (t != null) return t;
-      } catch (_) {}
-    }
-    return null;
+  // 探测用的文本请求：跨域只走 GM，同源只走原生，不互相回退
+  async function fetchText(url, ref, useGM) {
+    return useGM ? gmText(url, ref) : nativeText(url);
   }
 
-  // 跨域流能否直接用原生请求：成功拿到播放列表 = 对方放行了 CORS，且接受页面自带的 Origin / Referer
-  async function canNative(it) {
-    if (it._native !== undefined) return it._native;
-    let ok = false;
-    try { const t = await nativeText(it.url, 3000); ok = !!t && /^\s*#EXTM3U/.test(t); } catch (_) { ok = false; }
-    return (it._native = ok);
+  // GM 返回的二进制统一成本 realm 的 ArrayBuffer（跨 realm 的 instanceof 会失败；Blob / 视图 / latin1 字符串兜底）
+  async function toArrayBuffer(x) {
+    if (x == null) return null;
+    const tag = Object.prototype.toString.call(x);
+    if (tag === '[object ArrayBuffer]') return x instanceof ArrayBuffer ? x : new Uint8Array(x).slice().buffer;
+    if (ArrayBuffer.isView(x)) return new Uint8Array(x.buffer, x.byteOffset, x.byteLength).slice().buffer;
+    if (typeof x.arrayBuffer === 'function') return await x.arrayBuffer();
+    if (typeof x === 'string') { const u = new Uint8Array(x.length); for (let i = 0; i < x.length; i++) u[i] = x.charCodeAt(i) & 255; return u.buffer; }
+    return null;
   }
 
   function newStats() {
@@ -513,24 +514,34 @@
         }
         let range;
         if (context.rangeStart != null && context.rangeEnd != null) range = `bytes=${context.rangeStart}-${context.rangeEnd - 1}`;
+        const tmo = (config && config.timeout) || 20000;
         this._pending = true;
+        const wd = setTimeout(() => { // 看门狗：GM 挂起时交给 hls.js 的重试，而不是一直转圈
+          if (!this._pending) return;
+          this._pending = false; try { if (this._req && this._req.abort) this._req.abort(); } catch (_) {}
+          callbacks.onTimeout(stats, context, null);
+        }, tmo + 3000);
         this._req = gmReq({
-          url: context.url, ref, range, type: isBuf ? 'arraybuffer' : 'text', timeout: (config && config.timeout) || 20000,
+          url: context.url, ref, range, type: isBuf ? 'arraybuffer' : 'text', timeout: tmo,
           onload: async (r) => {
             if (!this._pending) return;
-            this._pending = false;
             this._hdr = r.responseHeaders || '';
             if (r.status >= 200 && r.status < 300) {
-              let data = isBuf ? r.response : (r.responseText != null ? r.responseText : r.response);
-              try { if (isBuf && data && data.byteLength === undefined && typeof data.arrayBuffer === 'function') data = await data.arrayBuffer(); } catch (_) { data = null; }
-              if (data == null) { callbacks.onError({ code: r.status, text: 'empty response' }, context, r, stats); return; }
+              let data = null;
+              try { data = isBuf ? await toArrayBuffer(r.response) : (r.responseText != null ? r.responseText : r.response); } catch (_) { data = null; }
+              if (!this._pending) return;
+              this._pending = false; clearTimeout(wd);
+              if (data == null || (isBuf && !data.byteLength)) { callbacks.onError({ code: r.status, text: 'empty response' }, context, r, stats); return; }
               stats.loading.first = stats.loading.start + 1; stats.loading.end = Math.max(stats.loading.first, nowMs());
-              stats.loaded = stats.total = isBuf ? (data.byteLength || 0) : String(data).length;
+              stats.loaded = stats.total = isBuf ? data.byteLength : String(data).length;
               callbacks.onSuccess({ url: r.finalUrl || context.url, data, code: r.status }, stats, context, r);
-            } else callbacks.onError({ code: r.status, text: r.statusText || ('HTTP ' + r.status) }, context, r, stats);
+            } else {
+              this._pending = false; clearTimeout(wd);
+              callbacks.onError({ code: r.status, text: r.statusText || ('HTTP ' + r.status) }, context, r, stats);
+            }
           },
-          onerror: () => { if (!this._pending) return; this._pending = false; callbacks.onError({ code: 0, text: 'GM network error' }, context, null, stats); },
-          ontimeout: () => { if (!this._pending) return; this._pending = false; callbacks.onTimeout(stats, context, null); }
+          onerror: () => { if (!this._pending) return; this._pending = false; clearTimeout(wd); callbacks.onError({ code: 0, text: 'GM network error' }, context, null, stats); },
+          ontimeout: () => { if (!this._pending) return; this._pending = false; clearTimeout(wd); callbacks.onTimeout(stats, context, null); }
         });
       }
     };
@@ -1580,7 +1591,6 @@
 
     /* ---- 加载媒体（默认不自动播放） ---- */
     let startTime = 0, triedNative = false, loadSeq = 0;
-    const triedModes = new Set(); // 本次加载已试过的 HLS 网络层：'native' | 'gm'
     const destroyHls = () => { if (me.hls) { try { me.hls.destroy(); } catch (_) {} me.hls = null; } };
     video.addEventListener('loadedmetadata', () => {
       if (startTime > 1 && isFinite(video.duration) && startTime < video.duration - 2) video.currentTime = startTime;
@@ -1590,43 +1600,19 @@
 
     function startHls(H, it, mode) {
       destroyHls();
-      triedModes.add(mode);
       const hls = new H({ enableWorker: true, maxBufferLength: 40, loader: makeLoader(H, mode, it.ref) });
-      let gotFrag = false, wd = 0;
-      const stopWd = () => { clearTimeout(wd); wd = 0; };
       me.hls = hls;
-      // 唯一的兜底：跨域流探测到原生可用、用原生播放，结果在「还没出画面」时失败 / 挂起，才改用 GM，且只换一次。
-      // 其余情况（同源、探测失败直接走了 GM、已经加载出画面）一律不切换。
-      const canFallback = mode === 'native' && needGM(it) && hasGM();
-      const started = () => gotFrag || video.readyState >= 2 || video.currentTime > 0;
-      const switchMode = () => {
-        if (!canFallback || started() || triedModes.has('gm')) return false;
-        triedModes.add('gm'); stopWd();
-        startTime = video.currentTime || startTime;
-        toast('原生加载失败，改用 GM 加载…', 1800);
-        setTimeout(() => { if (me.closed || me.current !== it || me.hls !== hls) return; startHls(H, it, 'gm'); }, 0);
-        return true;
-      };
-      hls.on(H.Events.FRAG_LOADED, () => { gotFrag = true; stopWd(); it._mode = mode; }); // 记住能播的方式，同一个源再加载不重复探测
-      // 看门狗：请求被挂起（不报错也不返回）时一直转圈——超时还没出画面就换 GM
-      if (canFallback) wd = setTimeout(() => { if (me.hls === hls) switchMode(); }, 8000);
       hls.on(H.Events.MANIFEST_PARSED, () => { if (menu.classList.contains('iosgp-menu-open')) renderMenu(); });
       hls.loadSource(it.url); hls.attachMedia(video);
       let retry = 0;
       hls.on(H.Events.ERROR, (_, d) => {
-        if (me.hls !== hls) return;
-        if (d.type === H.ErrorTypes.NETWORK_ERROR) {
-          // 原生模式下 code=0（被 CORS 拦截 / 网络错误）或 401/403/451（防盗链）不等重试耗尽，立刻切；致命错误也切
-          const quick = d.response && [0, 401, 403, 451].includes(d.response.code);
-          if ((d.fatal || quick) && switchMode()) return;
-        }
-        if (!d.fatal) return;
-        stopWd();
+        if (!d.fatal || me.hls !== hls) return;
         if (d.type === H.ErrorTypes.NETWORK_ERROR && retry++ < 3) { hls.startLoad(); return; }
         if (d.type === H.ErrorTypes.MEDIA_ERROR && retry++ < 3) { hls.recoverMediaError(); return; }
         if (!triedNative && video.canPlayType('application/vnd.apple.mpegurl')) { triedNative = true; destroyHls(); video.src = it.url; return; }
         spin.classList.remove('iosgp-show');
-        toast('播放失败：' + (d.details || d.type));
+        const code = d.response && d.response.code != null ? ' ' + d.response.code : '';
+        toast('播放失败：' + (d.details || d.type) + code + (mode === 'gm' ? '（GM）' : ''));
       });
     }
 
@@ -1634,7 +1620,7 @@
       if (it.type === 'hls') { const par = parentOf(it.url); if (par) it = par; } // 加载主清单，清晰度才能选
       const seq = ++loadSeq;
       destroyHls();
-      me.current = it; startTime = resumeAt || 0; triedNative = false; triedModes.clear();
+      me.current = it; startTime = resumeAt || 0; triedNative = false;
       spin.classList.add('iosgp-show');
       video.removeAttribute('src'); video.load();
       if (it.type !== 'hls') {
@@ -1645,15 +1631,8 @@
       const H = await loadHls(); // hls.js 懒加载：真要播 HLS 时才加载
       if (seq !== loadSeq || me.closed) return;
       if (H && H.isSupported && H.isSupported()) {
-        // 同源：原生；跨域：先用 fetch 探测（最多 3 秒），成功就原生，失败直接 GM
-        // 已经播放成功过的源：沿用当时的方式，不再探测、不再切换
-        let mode = it._mode || 'native';
-        if (!it._mode && needGM(it)) {
-          spin.classList.add('iosgp-show');
-          mode = (await canNative(it)) ? 'native' : 'gm'; // 探测失败直接 GM
-          if (seq !== loadSeq || me.closed) return;
-        }
-        startHls(H, it, mode);
+        // 同源：原生；跨域（流地址或来源页与当前页面不同源）：直接 GM，不做探测、不做切换
+        startHls(H, it, needGM(it) ? 'gm' : 'native');
       } else if (video.canPlayType('application/vnd.apple.mpegurl')) {
         triedNative = true; video.src = it.url;
       } else {
