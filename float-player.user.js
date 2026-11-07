@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         悬浮媒体播放器 (iOS 玻璃质感)
 // @namespace    https://github.com/520luo/js/float-player
-// @version      26.11.06.7
+// @version      26.11.06.8
 // @description  识别到页面里的 M3U8 / MP4 / WebM 后，自动在顶部悬浮出 iOS 玻璃质感播放器（默认暂停，可点 ✕ 关闭）；油猴菜单可开关「自动悬浮播放器」「固定悬浮窗」；可联动 M3U8 下载器
 // @icon         https://raw.githubusercontent.com/520LUO/icons/refs/heads/main/player.png
 // @author       520LUO
@@ -303,8 +303,13 @@
    * 2. hls.js 懒加载 + 网络层（GM_xmlhttpRequest 加载器、播放列表缓存）
    * =======================================================*/
   const hasGM = () => typeof GM_xmlhttpRequest === 'function';
-  // 来源 iframe 与顶层不同源：嵌入式播放器的流在顶层 CORS / Referer 校验大概率不通，直接走 GM
-  const needGM = (it) => !!(hasGM() && it && it.ref && originOf(it.ref) && originOf(it.ref) !== location.origin);
+  // 来源 iframe 或流地址与顶层不同源：在顶层 CORS / Referer 校验大概率不通，直接走 GM
+  // （探测时长走的是 GM 请求，所以「能拿到时长」不代表页面里的 XHR 也能拉到分片）
+  const needGM = (it) => {
+    if (!hasGM() || !it) return false;
+    const a = originOf(it.url), b = it.ref ? originOf(it.ref) : '';
+    return (!!a && a !== location.origin) || (!!b && b !== location.origin);
+  };
 
   function getGlobalHls() {
     try { if (window.Hls) return window.Hls; } catch (_) {}
@@ -346,8 +351,25 @@
         H = getGlobalHls();
         if (H) return H;
       }
-      // 3) 直接加载 CDN 脚本（同样可能受 CSP 限制）
-      await injectScript({ src: 'https://cdn.jsdelivr.net/npm/hls.js@1.5.17/dist/hls.min.js' });
+      // 3) @resource 没取到：用 GM 把 CDN 脚本文本拉下来，同样先在脚本环境执行
+      const CDN = 'https://cdn.jsdelivr.net/npm/hls.js@1.5.17/dist/hls.min.js';
+      if (!code && hasGM()) {
+        const txt = await gmText(CDN, '');
+        if (txt && txt.length > 10000) {
+          try {
+            const mod = { exports: {} };
+            new Function('module', 'exports', 'define', txt).call(window, mod, mod.exports, undefined);
+            const ex = mod.exports;
+            H = (ex && ex.isSupported ? ex : (ex && ex.default)) || getGlobalHls();
+            if (H && H.isSupported) return H;
+          } catch (_) {}
+          await injectScript({ text: txt });
+          H = getGlobalHls();
+          if (H) return H;
+        }
+      }
+      // 4) 直接加载 CDN 脚本（同样可能受 CSP 限制）
+      await injectScript({ src: CDN });
       H = getGlobalHls();
       if (H) return H;
       hlsPromise = null; // 失败允许下次重试
@@ -1433,7 +1455,7 @@
       const cur = me.current;
       // 下载：直链文件走 GM_download；M3U8 联动「M3U8 媒体下载器」脚本
       downloadItem.disabled = false;
-      downloadItem.querySelector('.iosgp-menu-label').textContent = cur.type === 'hls' ? '下载视频（M3U8）' : '下载视频';
+      downloadItem.querySelector('.iosgp-menu-label').textContent = '下载视频';
       copyItem.disabled = false;
       // 清晰度（仅 HLS 多码率）
       qualityBox.innerHTML = '';
@@ -1513,7 +1535,8 @@
     ro.observe(wrapper);
 
     /* ---- 加载媒体（默认不自动播放） ---- */
-    let startTime = 0, triedNative = false, triedGM = false, loadSeq = 0;
+    let startTime = 0, triedNative = false, loadSeq = 0;
+    const triedModes = new Set(); // 本次加载已试过的 HLS 网络层：'native' | 'gm'
     const destroyHls = () => { if (me.hls) { try { me.hls.destroy(); } catch (_) {} me.hls = null; } };
     video.addEventListener('loadedmetadata', () => {
       if (startTime > 1 && isFinite(video.duration) && startTime < video.duration - 2) video.currentTime = startTime;
@@ -1523,20 +1546,26 @@
 
     function startHls(H, it, mode) {
       destroyHls();
+      triedModes.add(mode);
       const hls = new H({ enableWorker: true, maxBufferLength: 40, loader: makeLoader(H, mode, it.ref) });
       me.hls = hls;
       hls.loadSource(it.url); hls.attachMedia(video);
       let retry = 0;
       hls.on(H.Events.ERROR, (_, d) => {
-        if (!d.fatal || me.hls !== hls) return;
-        // 默认网络层失败（多半是 CORS / Referer）：切到 GM_xmlhttpRequest 带来源页 Referer 重来一次
-        if (d.type === H.ErrorTypes.NETWORK_ERROR && mode !== 'gm' && !triedGM && hasGM()) {
-          triedGM = true;
-          const wasPlaying = !video.paused;
-          startTime = video.currentTime || startTime;
-          setTimeout(() => { if (me.closed || me.current !== it) return; startHls(H, it, 'gm'); if (wasPlaying) video.play().catch(() => {}); }, 0);
-          return;
+        if (me.hls !== hls) return;
+        // 网络层失败：原生 XHR（多半是 CORS）与 GM_xmlhttpRequest（带来源页 Referer）互为后备，各试一次。
+        // 原生模式下 code=0（被 CORS 拦截 / 网络错误）不必等重试耗尽就立刻切，否则会一直转圈。
+        if (d.type === H.ErrorTypes.NETWORK_ERROR) {
+          const alt = mode === 'gm' ? 'native' : 'gm';
+          const quick = mode !== 'gm' && d.response && d.response.code === 0;
+          if ((d.fatal || quick) && !triedModes.has(alt) && (alt !== 'gm' || hasGM())) {
+            const wasPlaying = !video.paused;
+            startTime = video.currentTime || startTime;
+            setTimeout(() => { if (me.closed || me.current !== it) return; startHls(H, it, alt); if (wasPlaying) video.play().catch(() => {}); }, 0);
+            return;
+          }
         }
+        if (!d.fatal) return;
         if (d.type === H.ErrorTypes.NETWORK_ERROR && retry++ < 3) { hls.startLoad(); return; }
         if (d.type === H.ErrorTypes.MEDIA_ERROR && retry++ < 3) { hls.recoverMediaError(); return; }
         if (!triedNative && video.canPlayType('application/vnd.apple.mpegurl')) { triedNative = true; destroyHls(); video.src = it.url; return; }
@@ -1548,7 +1577,7 @@
     async function load(it, resumeAt, autoplay) {
       const seq = ++loadSeq;
       destroyHls();
-      me.current = it; startTime = resumeAt || 0; triedNative = false; triedGM = false;
+      me.current = it; startTime = resumeAt || 0; triedNative = false; triedModes.clear();
       spin.classList.add('iosgp-show');
       video.removeAttribute('src'); video.load();
       if (it.type !== 'hls') {
