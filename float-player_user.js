@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         悬浮媒体播放器 (iOS 玻璃质感)
 // @namespace    https://github.com/520luo/js/float-player
-// @version      26.11.06.20
+// @version      26.11.06.22
 // @description  识别到页面里的 M3U8 / MP4 / WebM 后，自动在顶部悬浮出 iOS 玻璃质感播放器（默认暂停，可点 ✕ 关闭）；油猴菜单可开关「自动悬浮播放器」「固定悬浮窗」；可联动 M3U8 下载器
 // @icon         https://raw.githubusercontent.com/520LUO/icons/refs/heads/main/player.png
 // @author       520LUO
@@ -476,6 +476,41 @@
   }
   const hex = (buf, n) => Array.from(new Uint8Array(buf, 0, Math.min(n, buf.byteLength))).map((b) => b.toString(16).padStart(2, '0')).join(' ');
 
+  const ST_NAME = { 0x1b: 'H.264', 0x24: 'HEVC', 0x0f: 'AAC', 0x11: 'AAC-LATM', 0x03: 'MP2', 0x04: 'MP2', 0x81: 'AC-3', 0x87: 'E-AC-3', 0x15: 'ID3', 0x06: '私有', 0x02: 'MPEG2视频', 0x10: 'MPEG4视频' };
+  function tsInfo(buf) {
+    try {
+      const u = new Uint8Array(buf);
+      let sync = 0, bad = 0, pmtPid = -1, patSeen = 0;
+      const pids = {}, streams = [];
+      for (let o = 0; o + 188 <= u.length && o < 188 * 2500; o += 188) {
+        if (u[o] !== 0x47) { bad++; continue; }
+        sync++;
+        const pusi = (u[o + 1] & 0x40) !== 0, pid = ((u[o + 1] & 0x1f) << 8) | u[o + 2];
+        pids[pid] = (pids[pid] || 0) + 1;
+        const afc = (u[o + 3] >> 4) & 3;
+        let p = o + 4;
+        if (afc & 2) p += 1 + u[o + 4];
+        if (!(afc & 1) || p >= o + 188 || !pusi) continue;
+        if (pid === 0 || (pid === pmtPid && !streams.length)) {
+          p += 1 + u[p];
+          const tid = u[p], secLen = ((u[p + 1] & 0x0f) << 8) | u[p + 2];
+          if (pid === 0 && tid === 0 && !patSeen) {
+            patSeen = 1;
+            for (let q = p + 8; q + 4 <= p + 3 + secLen - 4; q += 4) { if (((u[q] << 8) | u[q + 1]) !== 0) { pmtPid = ((u[q + 2] & 0x1f) << 8) | u[q + 3]; break; } }
+          } else if (pid === pmtPid && tid === 2) {
+            const pil = ((u[p + 10] & 0x0f) << 8) | u[p + 11];
+            for (let q = p + 12 + pil; q + 5 <= p + 3 + secLen - 4;) {
+              const st = u[q], ep = ((u[q + 1] & 0x1f) << 8) | u[q + 2], el = ((u[q + 3] & 0x0f) << 8) | u[q + 4];
+              streams.push((ST_NAME[st] || ('0x' + st.toString(16))) + '@' + ep); q += 5 + el;
+            }
+          }
+        }
+      }
+      const top = Object.keys(pids).sort((a, b) => pids[b] - pids[a]).slice(0, 5).map((k) => k + ':' + pids[k]).join(',');
+      return `TS同步${sync}/坏${bad} PAT${patSeen ? '有' : '无'} PMT${pmtPid >= 0 ? '@' + pmtPid : '无'} 流[${streams.join(' ') || '未解析到'}] PID包数[${top}]`;
+    } catch (e) { return 'TS解析失败'; }
+  }
+  const plLog = []; // 最近拉到的播放列表文本（只留开头），卡住诊断时一并复制
   function newStats() {
     return {
       aborted: false, loaded: 0, retry: 0, total: 0, chunkCount: 0, bwEstimate: 0,
@@ -519,6 +554,13 @@
         const stats = this._stats;
         stats.loading.start = nowMs();
         const isBuf = context.responseType === 'arraybuffer';
+        if (!isBuf) {
+          const cb0 = callbacks;
+          callbacks = Object.assign({}, cb0, { onSuccess: (r, st, c, d) => {
+            try { plLog.push({ url: context.url, text: String(r.data).slice(0, 1800) }); if (plLog.length > 4) plLog.shift(); } catch (_) {}
+            cb0.onSuccess(r, st, c, d);
+          } });
+        }
         if (!isBuf) {
           const c = takeCache(context.url);
           if (c != null) {
@@ -1660,6 +1702,7 @@
         try {
           const f = d.frag, p = d.payload;
           const buf = p && p.buffer && !(p instanceof ArrayBuffer) ? p.buffer : p;
+          if (!T.ts && buf && !f.decryptdata && f.sn !== 'initSegment') T.ts = tsInfo(buf);
           T.last = `${f.type}#${f.sn}${f.decryptdata ? ' 加密' : ''} ${buf ? buf.byteLength : '?'}B 头${buf ? hex(buf, 4) : '?'}${f.initSegment ? ' 有MAP' : ''}`;
         } catch (_) {}
       });
@@ -1672,8 +1715,12 @@
         if (me.hls !== hls || me.closed || !spin.classList.contains('iosgp-show')) return;
         const g = (k) => C[k] || 0;
         const msg = `卡住：清单${T.man} 子清单${T.lvl} 分片请求${T.fl}/完成${T.fd}/入缓冲${T.ba} 编码${T.codecs || '?'} rs${video.readyState}${video.error ? ' vErr' + video.error.code : ''} ${T.errs.slice(-3).join(',') || '无错误'}` +
-          `｜挂载${g('MEDIA_ATTACHED')} 密钥${g('KEY_LOADING')}/${g('KEY_LOADED')} 解密${g('FRAG_DECRYPTED')} 音轨${g('AUDIO_TRACK_LOADING')}/${g('AUDIO_TRACK_LOADED')}(${(hls.audioTracks || []).length}) 初始化段${g('FRAG_PARSING_INIT_SEGMENT')} 解析数据${g('FRAG_PARSING_DATA')} 缓冲区${g('BUFFER_CREATED')}｜${T.last || '无分片'}`;
-        dbg(msg); toast(msg, 9000);
+          `｜挂载${g('MEDIA_ATTACHED')} 密钥${g('KEY_LOADING')}/${g('KEY_LOADED')} 解密${g('FRAG_DECRYPTED')} 音轨${g('AUDIO_TRACK_LOADING')}/${g('AUDIO_TRACK_LOADED')}(${(hls.audioTracks || []).length}) 初始化段${g('FRAG_PARSING_INIT_SEGMENT')} 解析数据${g('FRAG_PARSING_DATA')} 缓冲区${g('BUFFER_CREATED')}｜${T.last || '无分片'}｜${T.ts || ''}｜原生HLS:${video.canPlayType('application/vnd.apple.mpegurl') || '无'}`;
+        dbg(msg);
+        if (n === 1) {
+          const full = msg + '\n\n' + plLog.map((p) => '# ' + p.url + '\n' + p.text).join('\n\n');
+          copyText(full).then((ok) => toast(msg + (ok ? '\n（诊断信息和清单文本已复制，可直接粘贴发给我）' : ''), 10000));
+        } else toast(msg, 9000);
         if (n < 2) setTimeout(() => report(n + 1), 18000);
       };
       setTimeout(() => report(1), 12000);
