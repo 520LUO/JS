@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         悬浮媒体播放器 (iOS 玻璃质感)
 // @namespace    https://github.com/520luo/js/float-player
-// @version      26.11.06.8
+// @version      26.11.06.9
 // @description  识别到页面里的 M3U8 / MP4 / WebM 后，自动在顶部悬浮出 iOS 玻璃质感播放器（默认暂停，可点 ✕ 关闭）；油猴菜单可开关「自动悬浮播放器」「固定悬浮窗」；可联动 M3U8 下载器
 // @icon         https://raw.githubusercontent.com/520LUO/icons/refs/heads/main/player.png
 // @author       520LUO
@@ -1643,17 +1643,14 @@
   /* =========================================================
    * 8. 自动悬浮 + 手动入口小球
    * =======================================================*/
-  const MIN_AUTO_SECONDS = 45; // 短于该时长的视频不自动悬浮（手动点小球不受限）
+  const MIN_AUTO_SECONDS = 45; // 仅用于「无 HLS、只有一个直链文件」的情形：短于该时长不自动悬浮（手动点小球不受限）
 
-  // 页面上有源且可见的 <video> 里，时长已知的那些
-  function pageVideoDurations() {
-    const out = [];
-    document.querySelectorAll('video').forEach((v) => {
-      if (!(v.currentSrc || v.getAttribute('src') || v.querySelector('source[src]'))) return;
-      const r = v.getBoundingClientRect();
-      if ((r.width || r.height) && isFinite(v.duration) && v.duration > 0) out.push(v.duration);
-    });
-    return out;
+  // 页面里已加载好的 <video> 的时长（不发任何请求），按地址取
+  function loadedDuration(url) {
+    for (const v of document.querySelectorAll('video')) {
+      if (v.currentSrc === url && isFinite(v.duration) && v.duration > 0) return v.duration;
+    }
+    return null;
   }
   // 时长相差 2 秒内视为同一个视频（主清单 / 子清单 / <video> 重复嗅探到的是同一个），返回不同视频的个数
   function distinctCount(list) {
@@ -1695,28 +1692,10 @@
     }
     return mediaDuration(text, it.url);
   }
-  function probeFile(it) {
-    return new Promise((resolve) => {
-      let done = false, v = null;
-      const tm = setTimeout(() => finish(null), 6000);
-      function finish(d) {
-        if (done) return;
-        done = true; clearTimeout(tm);
-        if (v) { try { v.removeAttribute('src'); v.load(); } catch (_) {} }
-        resolve(d);
-      }
-      try {
-        v = document.createElement('video'); v.preload = 'metadata'; v.muted = true;
-        v.addEventListener('loadedmetadata', () => finish(isFinite(v.duration) && v.duration > 0 ? v.duration : null));
-        v.addEventListener('error', () => finish(null));
-        v.src = it.url;
-      } catch (_) { finish(null); }
-    });
-  }
-
-  // 探测时长：优先用页面已加载的 video；HLS 只拉播放列表；直链只读 metadata。结果缓存在条目上，拿不到为 null
+  // 探测时长（仅 HLS：只拉播放列表，用来给主清单 / 子清单去重）。直链文件不探测。结果缓存在条目上，拿不到为 null
   function probeDuration(it) {
     if (it._dur !== undefined) return Promise.resolve(it._dur);
+    if (it.type !== 'hls') return Promise.resolve((it._dur = null));
     for (const v of document.querySelectorAll('video')) {
       if (v.currentSrc === it.url && isFinite(v.duration) && v.duration > 0) return Promise.resolve((it._dur = v.duration));
     }
@@ -1725,7 +1704,7 @@
       let d = null;
       try {
         d = await Promise.race([
-          it.type === 'hls' ? probeHls(it) : probeFile(it),
+          probeHls(it),
           new Promise((r) => setTimeout(() => r(null), 7000))
         ]);
       } catch (_) {}
@@ -1737,20 +1716,31 @@
 
   let autoTimer = 0, autoProbing = false;
   async function autoDecide() {
-    // 1) 探测所有候选时长；短于 MIN_AUTO_SECONDS 的直接跳过（只影响自动弹出）
-    for (let round = 0; round < 3; round++) {
-      const todo = [...found.values()].filter((i) => !dismissed.has(i.url) && i._dur === undefined).sort((x, y) => y.t - x.t).slice(0, 6);
-      if (!todo.length) break;
-      await Promise.all(todo.map(probeDuration));
-      todo.forEach((i) => { if (i._dur != null && i._dur < MIN_AUTO_SECONDS) dismissed.add(i.url); });
-    }
     if (!autoFloat || P) return;
-    // 2) 剩下的「≥45s」视频若不止一个，不自动弹，交给用户点小球选择
-    const longs = pageVideoDurations().filter((d) => d >= MIN_AUTO_SECONDS);
-    found.forEach((i) => { if (!dismissed.has(i.url) && i._dur != null && i._dur >= MIN_AUTO_SECONDS) longs.push(i._dur); });
-    if (distinctCount(longs) > 1) return;
-    const best = pickBest(true);
-    if (best) openPlayer(best, { autoplay: false });
+    const hlsList = () => [...found.values()].filter((i) => i.type === 'hls' && !dismissed.has(i.url)).sort((x, y) => y.t - x.t);
+    let list = hlsList();
+
+    // 1) 页面上只有一个 HLS：不管旁边有多少直链文件（多半是预览页的动态短视频），直接弹这个 HLS
+    if (list.length === 1) { openPlayer(list[0], { autoplay: false }); return; }
+
+    // 2) 多个 HLS：可能是同一个视频的主清单 / 子清单，探测时长去重（文件源不探测）；去重后仍只有一个才弹
+    if (list.length > 1) {
+      await Promise.all(list.slice(0, 6).map(probeDuration));
+      if (!autoFloat || P) return;
+      list = hlsList();
+      const known = list.filter((i) => i._dur != null).map((i) => i._dur);
+      const unknown = list.length - known.length; // 直播 / 探测失败 / 没探测的，各算一个
+      if (list.length && distinctCount(known) + unknown === 1) openPlayer(list[0], { autoplay: false });
+      return;
+    }
+
+    // 3) 没有 HLS：只有一个直链文件，且页面里该 <video> 已经加载出 ≥45 秒的时长才弹；
+    //    其余情况（多个文件 / 时长未知 / 短视频）不打扰，交给用户点小球
+    const files = [...found.values()].filter((i) => !dismissed.has(i.url));
+    if (files.length === 1) {
+      const d = loadedDuration(files[0].url);
+      if (d != null && d >= MIN_AUTO_SECONDS) openPlayer(files[0], { autoplay: false });
+    }
   }
   function maybeAutoOpen() {
     if (!IS_TOP || !autoFloat || P) return;
@@ -1796,6 +1786,9 @@
     ball.style.display = (found.size && !P) ? 'flex' : 'none';
     ballBadge.textContent = String(found.size);
   }
+
+  // 单个直链文件的时长要等 <video> 元数据加载出来才知道：加载完再判断一次
+  document.addEventListener('loadedmetadata', (e) => { if (e.target && e.target.tagName === 'VIDEO' && !P) maybeAutoOpen(); }, true);
 
   registerMenu();
   const initialScan = () => { scanAll(); refreshBall(); };
