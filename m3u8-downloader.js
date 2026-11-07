@@ -216,7 +216,7 @@
         }
         menuCommandIds = [];
         try {
-            const label = sniffEnabled ? '✅ 自动嗅探-ON' : '🚫 自动嗅探-OFF';
+            const label = sniffEnabled ? '✅ 自动嗅探已开启-ON' : '🚫 自动嗅探已关闭-OFF';
             const id = GM_registerMenuCommand(label, () => {
                 sniffEnabled = !sniffEnabled;
                 try {
