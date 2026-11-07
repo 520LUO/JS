@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         悬浮媒体播放器 (iOS 玻璃质感)
 // @namespace    https://github.com/520luo/js/float-player
-// @version      26.11.06.19
+// @version      26.11.06.20
 // @description  识别到页面里的 M3U8 / MP4 / WebM 后，自动在顶部悬浮出 iOS 玻璃质感播放器（默认暂停，可点 ✕ 关闭）；油猴菜单可开关「自动悬浮播放器」「固定悬浮窗」；可联动 M3U8 下载器
 // @icon         https://raw.githubusercontent.com/520LUO/icons/refs/heads/main/player.png
 // @author       520LUO
@@ -1654,12 +1654,25 @@
       hls.on(E.MANIFEST_LOADED, () => T.man++);
       hls.on(E.LEVEL_LOADED, () => T.lvl++);
       hls.on(E.FRAG_LOADING, () => T.fl++);
-      hls.on(E.FRAG_LOADED, () => T.fd++);
+      T.last = '';
+      hls.on(E.FRAG_LOADED, (_, d) => {
+        T.fd++;
+        try {
+          const f = d.frag, p = d.payload;
+          const buf = p && p.buffer && !(p instanceof ArrayBuffer) ? p.buffer : p;
+          T.last = `${f.type}#${f.sn}${f.decryptdata ? ' 加密' : ''} ${buf ? buf.byteLength : '?'}B 头${buf ? hex(buf, 4) : '?'}${f.initSegment ? ' 有MAP' : ''}`;
+        } catch (_) {}
+      });
+      const C = {};
+      ['MEDIA_ATTACHED', 'KEY_LOADING', 'KEY_LOADED', 'FRAG_DECRYPTED', 'FRAG_PARSING_INIT_SEGMENT', 'FRAG_PARSING_DATA', 'FRAG_PARSED', 'BUFFER_CREATED', 'AUDIO_TRACK_LOADING', 'AUDIO_TRACK_LOADED']
+        .forEach((n) => { if (E[n]) hls.on(E[n], () => { C[n] = (C[n] || 0) + 1; }); });
       hls.on(E.BUFFER_APPENDED, () => T.ba++);
       hls.on(E.BUFFER_CODECS, (_, d) => { try { T.codecs = Object.keys(d).map((k) => (d[k] && d[k].codec) || '').filter(Boolean).join('+'); } catch (_) {} });
       const report = (n) => {
         if (me.hls !== hls || me.closed || !spin.classList.contains('iosgp-show')) return;
-        const msg = `卡住：清单${T.man} 子清单${T.lvl} 分片请求${T.fl}/完成${T.fd}/入缓冲${T.ba} 编码${T.codecs || '?'} rs${video.readyState}${video.error ? ' vErr' + video.error.code : ''} ${T.errs.slice(-3).join(',') || '无错误'}`;
+        const g = (k) => C[k] || 0;
+        const msg = `卡住：清单${T.man} 子清单${T.lvl} 分片请求${T.fl}/完成${T.fd}/入缓冲${T.ba} 编码${T.codecs || '?'} rs${video.readyState}${video.error ? ' vErr' + video.error.code : ''} ${T.errs.slice(-3).join(',') || '无错误'}` +
+          `｜挂载${g('MEDIA_ATTACHED')} 密钥${g('KEY_LOADING')}/${g('KEY_LOADED')} 解密${g('FRAG_DECRYPTED')} 音轨${g('AUDIO_TRACK_LOADING')}/${g('AUDIO_TRACK_LOADED')}(${(hls.audioTracks || []).length}) 初始化段${g('FRAG_PARSING_INIT_SEGMENT')} 解析数据${g('FRAG_PARSING_DATA')} 缓冲区${g('BUFFER_CREATED')}｜${T.last || '无分片'}`;
         dbg(msg); toast(msg, 9000);
         if (n < 2) setTimeout(() => report(n + 1), 18000);
       };
