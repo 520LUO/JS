@@ -6,6 +6,7 @@
 // @icon         https://raw.githubusercontent.com/520LUO/icons/refs/heads/main/floatplayer.png
 // @author       520LUO
 // @match        *://*/*
+// @exclude /^https?:\/\/(?:[^/]+\.)?(?:x\.com|twitter\.com|youtube\.com|twimg\.com)(?:\/|$)/
 // @grant        GM_setClipboard
 // @grant        GM_registerMenuCommand
 // @grant        GM_unregisterMenuCommand
