@@ -1,13 +1,21 @@
 // ==UserScript==
 // @name         Cloudflare 站点检测 (Trace + DNS 目标IP + ECS + 边缘归属)
 // @namespace    https://github.com/52luo/js/cf-detector
-// @version      6.3
+// @version      6.4
 // @description  检测 Cloudflare CDN，解析当前网站IP（ECS），显示本机 IP、边缘归属（国旗/代号/国名）
 // @author       520LUO
 // @match        *://*/*
 // @icon         https://www.google.com/s2/favicons?sz=64&domain=cloudflare.com
 // @grant        GM_xmlhttpRequest
 // @grant        GM.xmlHttpRequest
+// @grant        GM_getValue
+// @grant        GM_setValue
+// @grant        GM_registerMenuCommand
+// @grant        GM_unregisterMenuCommand
+// @grant        GM.getValue
+// @grant        GM.setValue
+// @grant        GM.registerMenuCommand
+// @grant        GM.unregisterMenuCommand
 // @connect       *
 // @run-at       document-end
 // ==/UserScript==
@@ -17,9 +25,70 @@
     // ==================== 配置 ====================
     const DNS_RESOLVER_URL = 'https://cloudflare-dns.com/dns-query';
     const IPINFO_API_TEMPLATE = 'https://api.db-ip.com/v2/free/${ip}'; // 准确率高
-    const CACHE_KEY = 'cf_trace_dns_cache';
+    const CACHE_KEY = 'cf_trace_dns_cache_v2';
+    const DOH_ENABLED_KEY = 'cf_detector_doh_enabled';
     const CACHE_TTL = 30000;
     // ==================== 配置结束 ====================
+
+    // ---------- DOH 开关与脚本菜单 ----------
+    // 默认开启；优先使用用户脚本管理器的跨站点存储，兼容旧版 GM_* API。
+    var dohEnabled = true;
+    var dohMenuId = null;
+
+    async function loadDohEnabled() {
+        try {
+            if (typeof GM_getValue === 'function') {
+                dohEnabled = GM_getValue(DOH_ENABLED_KEY, true) !== false;
+            } else if (typeof GM !== 'undefined' && typeof GM.getValue === 'function') {
+                dohEnabled = (await GM.getValue(DOH_ENABLED_KEY, true)) !== false;
+            } else {
+                dohEnabled = localStorage.getItem(DOH_ENABLED_KEY) !== 'false';
+            }
+        } catch (e) { dohEnabled = true; }
+    }
+
+    async function saveDohEnabled() {
+        try {
+            if (typeof GM_setValue === 'function') {
+                GM_setValue(DOH_ENABLED_KEY, dohEnabled);
+            } else if (typeof GM !== 'undefined' && typeof GM.setValue === 'function') {
+                await GM.setValue(DOH_ENABLED_KEY, dohEnabled);
+            } else {
+                localStorage.setItem(DOH_ENABLED_KEY, String(dohEnabled));
+            }
+        } catch (e) {
+            try { localStorage.setItem(DOH_ENABLED_KEY, String(dohEnabled)); } catch (_) {}
+        }
+    }
+
+    function dohMenuLabel() {
+        return dohEnabled ? '✅DOH解析已开启-ON' : '🚫DOH解析已关闭-OFF';
+    }
+
+    function registerDohMenu() {
+        var register = null;
+        var unregister = null;
+        if (typeof GM_registerMenuCommand === 'function') {
+            register = GM_registerMenuCommand;
+            if (typeof GM_unregisterMenuCommand === 'function') unregister = GM_unregisterMenuCommand;
+        } else if (typeof GM !== 'undefined' && typeof GM.registerMenuCommand === 'function') {
+            register = GM.registerMenuCommand.bind(GM);
+            if (typeof GM.unregisterMenuCommand === 'function') unregister = GM.unregisterMenuCommand.bind(GM);
+        }
+        if (!register) return;
+        try {
+            if (dohMenuId !== null && unregister) unregister(dohMenuId);
+            dohMenuId = register(dohMenuLabel(), async function () {
+                dohEnabled = !dohEnabled;
+                await saveDohEnabled();
+                try { sessionStorage.removeItem(CACHE_KEY); } catch (e) {}
+                registerDohMenu();
+                await refreshDetection();
+            });
+        } catch (e) {
+            addDebug('菜单注册失败: ' + (e && e.message ? e.message : e));
+        }
+    }
 
     // 隐藏滚动条
     const styleEl = document.createElement('style');
@@ -209,8 +278,8 @@
             } catch (e) {}
         }
 
-        // 3. 目标 IP + 归属地
-        if (result.cf) {
+        // 3. 目标 IP + 归属地（DOH 关闭时完全跳过 DNS 请求）
+        if (result.cf && dohEnabled) {
             var ips = await resolveTargetIPs(location.hostname, result.clientIP);
             result.targetIPs = ips;
             var infoPromises = ips.map(function (ip) {
@@ -281,7 +350,9 @@
             html += '<div style="margin-bottom:8px; color:#888;">边缘节点未知</div>';
         }
 
-        if (data.cf && data.targetIPs.length > 0) {
+        if (data.cf && !dohEnabled) {
+            html += '<div style="color:#888; margin-top:10px;">DOH 解析已关闭</div>';
+        } else if (data.cf && data.targetIPs.length > 0) {
             html += '<div style="margin-top:12px;"><div style="font-weight:bold; font-size:12px; color:#444; margin-bottom:6px;">DOH解析到的目标IP (' + data.targetIPs.length + ')</div><div style="padding-left:4px;">';
             data.targetIPs.forEach(function (ip) {
                 var info = data.ipInfoCache[ip];
@@ -420,7 +491,10 @@
         var hostname = location.hostname;
         if (!hostname || hostname === 'localhost' || hostname === '127.0.0.1' || hostname === '::1') return;
 
+        await loadDohEnabled();
+        registerDohMenu();
         addDebug('🔍 检测: ' + hostname);
+        addDebug(dohMenuLabel());
         var data = await detectAll();
         currentData = data;
         addDebug(data.cf ? (data.trace ? '✅ Cloudflare 正常' : '⚠️ Trace 不可用') : 'ℹ️ 非 CF 站点');
