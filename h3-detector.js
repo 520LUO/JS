@@ -4,7 +4,7 @@
 // @version      1.2
 // @description  检测网站是否支持H3/QUIC，以及当前连接所使用的协议类型
 // @author       520luo
-// @icon
+// @icon         https://raw.githubusercontent.com/520LUO/icons/refs/heads/main/h3.png
 // @match        *://*/*
 // @run-at       document-idle
 // @grant        GM_addStyle
