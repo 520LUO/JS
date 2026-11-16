@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         悬浮媒体播放器
 // @namespace    https://github.com/520luo/js/float-player
-// @version      26.11.10
-// @description  识别到媒体后自动在顶部悬浮播放器（默认暂停，可点 ✕ 关闭）；油猴菜单可开关「自动悬浮播放器」「固定悬浮窗」；可联动 M3U8 下载器
+// @version      26.11.18
+// @description  识别到媒体后自动在顶部悬浮播放器（默认暂停，可点 ✕ 关闭）；油猴菜单可开关「自动悬浮」「固定悬浮窗」；兼容 GM4 / 现代油猴引擎；可联动 M3U8 下载器
 // @icon         https://raw.githubusercontent.com/520LUO/icons/refs/heads/main/floatplayer.png
 // @author       520LUO
 // @match        *://*/*
@@ -15,6 +15,16 @@
 // @grant        GM_xmlhttpRequest
 // @grant        GM_download
 // @grant        GM_getResourceText
+// @grant        GM.xmlHttpRequest
+// @grant        GM.download
+// @grant        GM.setClipboard
+// @grant        GM.registerMenuCommand
+// @grant        GM.unregisterMenuCommand
+// @grant        GM.getValue
+// @grant        GM.setValue
+// @grant        GM.getResourceText
+// @grant        GM.getResourceUrl
+// @grant        unsafeWindow
 // @connect      *
 // @resource     hlsjs https://cdn.jsdelivr.net/npm/hls.js@1.5.17/dist/hls.min.js
 // @run-at       document-start
@@ -38,7 +48,7 @@
   const TOPW = window.top;
   const MSG = '__mf_float_player__';
   const MSG_PAUSE = '__mf_float_player_pause__';
-  const MAX_ITEMS = 12;
+  const MAX_ITEMS = 16;
   const SKIP_SECONDS = 10;
   const SEEK_STEP = 5;
   const HIDE_DELAY = 3800;
@@ -50,13 +60,40 @@
    * =======================================================*/
   const found = new Map(); // url -> { url, type, from, t, ref }
   const dismissed = new Set(); // 用户点 ✕ 关掉过的地址：自动悬浮不再打扰
-  const rawFetch = typeof window.fetch === 'function' ? window.fetch : null;
+  // 页面真正的 window（脚本沙盒下 window 可能是代理对象，网络钩子要挂在页面 window 上）
+  const W = (typeof unsafeWindow !== 'undefined' && unsafeWindow) || window;
+  const rawFetch = typeof W.fetch === 'function' ? W.fetch : null;
 
-  const HLS_RE = /\.m3u8(?=$|[?&#=\/;,])/i;
-  const FILE_RE = /\.(?:mp4|m4v|webm|mov|ogv)(?=$|[?&#=\/;,])/i;
+  // GM 兼容层：优先旧式 GM_*（同步、可 abort），没有就用 GM4 的 GM.*（Promise）。全部统一成 G.xxx，缺失为 null
+  const GMo = (typeof GM !== 'undefined' && GM) || null;
+  const G = {
+    xhr: typeof GM_xmlhttpRequest === 'function' ? (o) => GM_xmlhttpRequest(o)
+      : (GMo && typeof GMo.xmlHttpRequest === 'function' ? (o) => GMo.xmlHttpRequest(o) : null),
+    getValue: typeof GM_getValue === 'function' ? (k, d) => GM_getValue(k, d)
+      : (GMo && typeof GMo.getValue === 'function' ? (k, d) => GMo.getValue(k, d) : null),
+    setValue: typeof GM_setValue === 'function' ? (k, v) => GM_setValue(k, v)
+      : (GMo && typeof GMo.setValue === 'function' ? (k, v) => GMo.setValue(k, v) : null),
+    reg: typeof GM_registerMenuCommand === 'function' ? (n, f) => GM_registerMenuCommand(n, f)
+      : (GMo && typeof GMo.registerMenuCommand === 'function' ? (n, f) => GMo.registerMenuCommand(n, f) : null),
+    unreg: typeof GM_unregisterMenuCommand === 'function' ? (id) => GM_unregisterMenuCommand(id)
+      : (GMo && typeof GMo.unregisterMenuCommand === 'function' ? (id) => GMo.unregisterMenuCommand(id) : null),
+    clip: typeof GM_setClipboard === 'function' ? (t, ty) => GM_setClipboard(t, ty)
+      : (GMo && typeof GMo.setClipboard === 'function' ? (t, ty) => GMo.setClipboard(t, ty) : null),
+    dl: typeof GM_download === 'function' ? (o) => GM_download(o)
+      : (GMo && typeof GMo.download === 'function' ? (o) => GMo.download(o) : null)
+  };
+  let selfAttach = false; // 我们自己创建 Shadow DOM 时置位，避免被 attachShadow 钩子当成页面的播放器
+
+  const HLS_RE = /(?:\.m3u8(?=$|[?&#=\/;,])|[?&;](?:format|type|ext|fmt|f)=(?:m3u8|hls)(?=$|[&#;]))/i;
+  const FILE_RE = /(?:\.(?:mp4|m4v|webm|mov|ogv)(?=$|[?&#=\/;,])|[?&;](?:format|type|ext|fmt|f)=(?:mp4|webm)(?=$|[&#;]))/i;
   const HLS_CT = /mpegurl/i;
   const FILE_CT = /^video\/(?:mp4|webm|ogg|quicktime|x-m4v)/i;
   const SEG_RE = /\.(?:m4s|ts|m4f|cmfv|cmfa|aac|mp3|m4a|key)(?![a-z0-9])/i;
+
+  // 弱来源：只是在响应正文 / 内联脚本 / data-* 属性里「文字上出现」的地址，不代表真的在播，只进小球，不参与自动悬浮
+  const WEAK_FROM = new Set(['body', 'script', 'attr']);
+  // 地址路径里带 preview / thumb / teaser 之类字样：多半是动态预览，不自动悬浮
+  const PREVIEW_RE = /(?:^|[\/_.\-])(?:previews?|thumbs?|thumbnails?|teasers?|sprites?|hover|snippets?|gif)(?=[\/_.\-]|$)/i;
 
   // 在 pathname + search + hash 里整体匹配：能识别 ?url=xxx.m3u8、/x.m3u8?token= 等
   function typeOf(url) {
@@ -80,12 +117,16 @@
       try { TOPW.postMessage({ [MSG]: 1, url, from, type, ref: location.href }, '*'); } catch (_) {}
       return;
     }
+    const weak = WEAK_FROM.has(from);
+    let pv = false;
+    try { pv = PREVIEW_RE.test(decodeURIComponent(new URL(url).pathname)); } catch (_) {}
     const old = found.get(url);
-    if (old) { old.t = Date.now(); if (ref && !old.ref) old.ref = ref; return; }
-    found.set(url, { url, type, from, t: Date.now(), ref: ref || location.href });
+    if (old) { old.t = Date.now(); if (ref && !old.ref) old.ref = ref; if (!weak) old.weak = false; return; }
+    found.set(url, { url, type, from, t: Date.now(), ref: ref || location.href, weak, preview: pv });
     if (found.size > MAX_ITEMS) {
-      const oldest = [...found.values()].sort((a, b) => a.t - b.t)[0];
-      found.delete(oldest.url);
+      const all = [...found.values()];
+      const pool = all.some((i) => i.weak) ? all.filter((i) => i.weak) : all; // 先淘汰弱来源
+      found.delete(pool.sort((a, b) => a.t - b.t)[0].url);
     }
     if (type === 'hls') scheduleEnrich();
     refreshBall();
@@ -111,59 +152,176 @@
     if (HLS_CT.test(ct)) { addFound(url, 'ct', 'hls'); return; }
     if (FILE_CT.test(ct) && len >= 2 * 1024 * 1024 && !SEG_RE.test(url)) addFound(url, 'ct', 'file');
   }
+  // 长度：优先取 Content-Range 里的总长（Range 请求的 Content-Length 只是一小段）
+  const contentLen = (cl, cr) => {
+    let n = +cl || 0;
+    const m = /\/(\d+)\s*$/.exec(cr || '');
+    if (m) n = Math.max(n, +m[1]);
+    return n;
+  };
+
+  // 响应正文嗅探：接口返回 JSON / 文本里直接带着播放地址（很多站点是这样拿到视频地址的）
+  const TEXT_CT = /json|javascript|text\/plain|\+xml|\/xml/i;
+  const NO_BODY_CT = /stream|ndjson/i;
+  const BODY_MAX = 1536 * 1024;
+  const URL_IN_TEXT = /(?:https?:)?\/\/[\w.-]+(?::\d+)?\/[^\s"'<>\\]*?\.(?:m3u8|mp4|m4v|webm|mov)(?![a-z0-9])(?:\?[^\s"'<>\\]*)?/gi;
+  const ENC_URL_IN_TEXT = /https?%3A%2F%2F[^\s"'<>\\&]+?\.(?:m3u8|mp4|m4v|webm|mov)(?![a-z0-9])(?:(?:\?|%3F)[^\s"'<>\\]*)?/gi;
+  function scanText(text, from) {
+    if (!text || text.length > BODY_MAX) return;
+    let t = text;
+    if (t.indexOf('\\') >= 0) t = t.replace(/\\u002[Ff]/g, '/').replace(/\\u0026/g, '&').replace(/\\\//g, '/');
+    let n = 0, m;
+    URL_IN_TEXT.lastIndex = 0;
+    while (n < 8 && (m = URL_IN_TEXT.exec(t))) { n++; addFound(m[0], from); }
+    if (n < 8 && t.indexOf('%3A%2F%2F') >= 0) {
+      ENC_URL_IN_TEXT.lastIndex = 0;
+      while (n < 8 && (m = ENC_URL_IN_TEXT.exec(t))) { n++; try { addFound(decodeURIComponent(m[0]), from); } catch (_) {} }
+    }
+  }
+  function scanBody(url, text) {
+    if (!text || text.length > BODY_MAX) return;
+    // 无后缀的 m3u8 播放列表（正文以 #EXTM3U 开头）
+    if (/^\s*#EXTM3U/.test(text)) {
+      if (/#EXT-X-STREAM-INF|#EXTINF/.test(text.slice(0, 6000))) addFound(url, 'body-m3u8', 'hls');
+      return;
+    }
+    scanText(text, 'body');
+  }
+  function sniffResponse(res, reqUrl) {
+    const url = res.url || reqUrl;
+    const h = res.headers;
+    const ct = h.get('content-type') || '';
+    const len = contentLen(h.get('content-length'), h.get('content-range'));
+    ctCheck(url, ct, len);
+    if (TEXT_CT.test(ct) && !NO_BODY_CT.test(ct) && !(len > BODY_MAX) && typeof res.clone === 'function') {
+      res.clone().text().then((t) => scanBody(url, t), () => {});
+    }
+  }
+  function sniffXhrBody(x, url) {
+    const ct = x.getResponseHeader('content-type') || '';
+    if (!TEXT_CT.test(ct) || NO_BODY_CT.test(ct)) return;
+    let t = '';
+    if (x.responseType === '' || x.responseType === 'text') t = x.responseText;
+    else if (x.responseType === 'json' && x.response) t = JSON.stringify(x.response);
+    scanBody(x.responseURL || url, t);
+  }
+
+  // 页面里所有 <video>（含已记录的 Shadow DOM 里的）
+  const shadowRoots = [];
+  function allVideos() {
+    const out = [...document.querySelectorAll('video')];
+    for (let i = shadowRoots.length - 1; i >= 0; i--) {
+      const r = shadowRoots[i];
+      try {
+        if (!r.host.isConnected) { shadowRoots.splice(i, 1); continue; }
+        r.querySelectorAll('video').forEach((v) => out.push(v));
+      } catch (_) {}
+    }
+    return out;
+  }
 
   function scanVideo(v) {
     try {
       const s = v.currentSrc || v.src;
-      if (s && !s.startsWith('blob:')) addFound(s, 'video');
-      v.querySelectorAll('source[src]').forEach((x) => addFound(x.src, 'source'));
+      // 没有后缀的 <video> 地址也算（forced 只在 typeOf 认不出时才生效）
+      if (s && !/^(?:blob|data|mediastream):/i.test(s)) addFound(s, 'video', 'file');
+      v.querySelectorAll('source').forEach((x) => {
+        const u = x.src || x.getAttribute('src');
+        if (u && !/^(?:blob|data):/i.test(u)) addFound(u, 'source', /mpegurl/i.test(x.type || '') ? 'hls' : 'file');
+      });
+      ['data-src', 'data-url', 'data-video', 'data-video-src'].forEach((a) => {
+        const u = v.getAttribute && v.getAttribute(a);
+        if (u && !/^(?:blob|data):/i.test(u)) addFound(u, 'attr');
+      });
     } catch (_) {}
   }
 
+  const MEDIA_EVTS = ['loadstart', 'playing', 'loadedmetadata', 'durationchange'];
+  function onMediaEvt(e) {
+    const t = e.target;
+    if (!t || t.tagName !== 'VIDEO') return;
+    scanVideo(t);
+    if (IS_TOP && (e.type === 'loadedmetadata' || e.type === 'durationchange')) maybeAutoOpen(); // 时长出来后重新判断
+  }
+  MEDIA_EVTS.forEach((ev) => document.addEventListener(ev, onMediaEvt, true));
+
+  // Shadow DOM：媒体事件不会穿出 shadow root，记录下来单独监听
   try {
-    if (rawFetch) {
-      window.fetch = function (input) {
-        try { addFound(typeof input === 'string' ? input : (input && input.url) || String(input), 'fetch'); } catch (_) {}
-        const p = rawFetch.apply(this, arguments);
+    const proto = W.Element && W.Element.prototype;
+    const rawAttach = proto && proto.attachShadow;
+    if (typeof rawAttach === 'function' && !rawAttach.__mf) {
+      const na = function () {
+        const root = rawAttach.apply(this, arguments);
         try {
-          p.then((res) => {
-            try { ctCheck(res.url, res.headers.get('content-type'), +res.headers.get('content-length') || 0); } catch (_) {}
-          }, () => {});
+          if (!selfAttach && root) {
+            shadowRoots.push(root);
+            if (shadowRoots.length > 120) shadowRoots.shift();
+            MEDIA_EVTS.forEach((ev) => root.addEventListener(ev, onMediaEvt, true));
+          }
         } catch (_) {}
-        return p;
+        return root;
       };
+      na.__mf = 1;
+      proto.attachShadow = na;
     }
-    const rawOpen = XMLHttpRequest.prototype.open;
-    XMLHttpRequest.prototype.open = function (m, u) {
-      try {
-        const url = String(u);
-        addFound(url, 'xhr');
-        if (!SEG_RE.test(url)) {
-          this.addEventListener('readystatechange', function () {
-            if (this.readyState !== 2) return;
-            try { ctCheck(this.responseURL || url, this.getResponseHeader('content-type'), +this.getResponseHeader('content-length') || 0); } catch (_) {}
-          });
-        }
-      } catch (_) {}
-      return rawOpen.apply(this, arguments);
-    };
   } catch (_) {}
+
+  // 网络钩子：fetch / XHR（同时挂在页面 window 与脚本 window 上，已挂过的不重复挂）
+  function hookNet(w) {
+    try {
+      const orig = w.fetch;
+      if (typeof orig === 'function' && !orig.__mf) {
+        const nf = function (input) {
+          let u = '';
+          try { u = typeof input === 'string' ? input : (input && input.url) || String(input); addFound(u, 'fetch'); } catch (_) {}
+          const p = orig.apply(this, arguments);
+          try { p.then((res) => { try { sniffResponse(res, u); } catch (_) {} }, () => {}); } catch (_) {}
+          return p;
+        };
+        nf.__mf = 1;
+        w.fetch = nf;
+      }
+    } catch (_) {}
+    try {
+      const proto = w.XMLHttpRequest && w.XMLHttpRequest.prototype;
+      const rawOpen = proto && proto.open;
+      if (typeof rawOpen === 'function' && !rawOpen.__mf) {
+        const no = function (m, u) {
+          try {
+            const url = String(u);
+            addFound(url, 'xhr');
+            if (!SEG_RE.test(url)) {
+              this.addEventListener('readystatechange', function () {
+                if (this.readyState !== 2) return;
+                try { ctCheck(this.responseURL || url, this.getResponseHeader('content-type'), contentLen(this.getResponseHeader('content-length'), this.getResponseHeader('content-range'))); } catch (_) {}
+              });
+              this.addEventListener('load', function () { try { sniffXhrBody(this, url); } catch (_) {} });
+            }
+          } catch (_) {}
+          return rawOpen.apply(this, arguments);
+        };
+        no.__mf = 1;
+        proto.open = no;
+      }
+    } catch (_) {}
+  }
+  hookNet(W);
+  if (window !== W) hookNet(window);
 
   try {
     new PerformanceObserver((list) => {
       for (const e of list.getEntries()) {
-        if (typeOf(e.name) === 'file' && e.encodedBodySize > 0 && e.encodedBodySize < 300 * 1024) continue;
-        addFound(e.name, 'net');
+        const k = typeOf(e.name);
+        if (k === 'file' && e.encodedBodySize > 0 && e.encodedBodySize < 300 * 1024) continue;
+        if (k) addFound(e.name, 'net');
+        else if (e.initiatorType === 'video' && !SEG_RE.test(e.name) && !/^(?:blob|data):/i.test(e.name)) addFound(e.name, 'net', 'file'); // <video> 直接请求的无后缀地址
       }
     }).observe({ type: 'resource', buffered: true });
   } catch (_) {}
 
-  document.addEventListener('loadstart', (e) => { if (e.target && e.target.tagName === 'VIDEO') scanVideo(e.target); }, true);
-  document.addEventListener('playing', (e) => { if (e.target && e.target.tagName === 'VIDEO') scanVideo(e.target); }, true);
-
   // 暂停本文档里的视频，并逐层通知子框架（子框架只接受来自父框架的消息）
   function pauseLocalVideos() {
-    document.querySelectorAll('video').forEach((v) => { if (!v.paused) { try { v.pause(); } catch (_) {} } });
+    allVideos().forEach((v) => { if (!v.paused) { try { v.pause(); } catch (_) {} } });
   }
   function broadcastPause() {
     try {
@@ -173,7 +331,28 @@
     } catch (_) {}
   }
 
-  const scanAll = () => document.querySelectorAll('video').forEach(scanVideo);
+  // 内联脚本里的播放器配置（只扫一次、只收「弱来源」）
+  const scriptSeen = new WeakSet();
+  function scanScripts() {
+    try {
+      document.querySelectorAll('script:not([src])').forEach((sc) => {
+        if (scriptSeen.has(sc)) return;
+        scriptSeen.add(sc);
+        const t = sc.textContent;
+        if (t && t.length > 20 && t.length < 600000 && /m3u8|mp4|webm|m4v|mov/i.test(t)) scanText(t, 'script');
+      });
+    } catch (_) {}
+  }
+  const scanAll = () => { allVideos().forEach(scanVideo); scanScripts(); };
+  // DOM 变化（动态插入 <video>/<source>、改 src）后稍作防抖再扫一遍；另有低频兜底
+  let moTimer = 0;
+  const scheduleScan = () => { if (moTimer) return; moTimer = setTimeout(() => { moTimer = 0; scanAll(); }, 600); };
+  try {
+    const mo = new MutationObserver(scheduleScan);
+    const startMo = () => { try { mo.observe(document.documentElement, { subtree: true, childList: true, attributes: true, attributeFilter: ['src', 'data-src'] }); } catch (_) {} };
+    if (document.documentElement) startMo(); else document.addEventListener('DOMContentLoaded', startMo, { once: true });
+  } catch (_) {}
+  setInterval(() => { if (!document.hidden) scanAll(); }, 4000);
 
   if (!IS_TOP) {
     window.addEventListener('message', (e) => {
@@ -210,14 +389,24 @@
 
   /* ---------- 设置：自动悬浮开关（油猴菜单切换，GM 存储持久化） ---------- */
   const AUTO_KEY = 'mf_float_player_auto';
-  let autoFloat = true;
-  try { if (typeof GM_getValue === 'function') autoFloat = GM_getValue(AUTO_KEY, true) !== false; } catch (_) {}
   const FIXED_KEY = 'mf_float_player_fixed';
-  let fixedMode = true; // 固定悬浮窗（默认开）；关闭后可单指拖动、双指捏合缩放
-  try { if (typeof GM_getValue === 'function') fixedMode = GM_getValue(FIXED_KEY, true) !== false; } catch (_) {}
   const DEBUG_KEY = 'mf_float_player_debug';
+  let autoFloat = true;
+  let fixedMode = true; // 固定悬浮窗（默认开）；关闭后可单指拖动、双指捏合缩放
   let debugOn = false;
-  try { if (typeof GM_getValue === 'function') debugOn = GM_getValue(DEBUG_KEY, false) === true; } catch (_) {}
+  let settingsReady = false; // GM4 的存取是异步的：设置读完之前不自动悬浮
+  const saveSetting = (k, v) => { try { if (G.setValue) Promise.resolve(G.setValue(k, v)).catch(() => {}); } catch (_) {} };
+  async function loadSettings() {
+    const get = (k, d) => { try { return G.getValue ? Promise.resolve(G.getValue(k, d)).catch(() => d) : Promise.resolve(d); } catch (_) { return Promise.resolve(d); } };
+    try {
+      const r = await Promise.race([
+        Promise.all([get(AUTO_KEY, true), get(FIXED_KEY, true), get(DEBUG_KEY, false)]),
+        new Promise((res) => setTimeout(() => res(null), 2500))
+      ]);
+      if (r) { autoFloat = r[0] !== false; fixedMode = r[1] !== false; debugOn = r[2] === true; }
+    } catch (_) {}
+    settingsReady = true;
+  }
   // 全局调试开关：关闭时不输出任何调试信息（控制台 / 页面提示 / 卡住诊断 / 诊断复制），也不收集诊断数据
   const dbg = (m) => {
     if (!debugOn) return;
@@ -250,32 +439,32 @@
   }
 
   function registerMenu() {
-    if (typeof GM_registerMenuCommand !== 'function') return;
-    if (typeof GM_unregisterMenuCommand === 'function') {
-      for (const id of menuIds) { try { GM_unregisterMenuCommand(id); } catch (_) {} }
+    if (!G.reg) return;
+    if (G.unreg) {
+      for (const id of menuIds) { try { Promise.resolve(id).then((x) => { if (x !== undefined) G.unreg(x); }).catch(() => {}); } catch (_) {} }
     }
     menuIds = [];
     try {
-      const id = GM_registerMenuCommand(autoFloat ? '✅ 悬浮播放器已开启-ON' : '🚫 悬浮播器放已关闭-OFF', () => {
+      const id = G.reg(autoFloat ? '✅ 自动悬浮已开启-ON' : '🚫 自动悬浮已关闭-OFF', () => {
         autoFloat = !autoFloat;
-        try { if (typeof GM_setValue === 'function') GM_setValue(AUTO_KEY, autoFloat); } catch (_) {}
+        saveSetting(AUTO_KEY, autoFloat);
         registerMenu();
         pageToast(autoFloat ? '自动悬浮播放器已开启' : '自动悬浮播放器已关闭');
         if (autoFloat) maybeAutoOpen();
       });
       if (id !== undefined) menuIds.push(id);
-      const id2 = GM_registerMenuCommand(fixedMode ? '📌 固定悬浮窗已开启-ON' : '🖐 固定悬浮窗已关闭-OFF（可拖动 / 捏合）', () => {
+      const id2 = G.reg(fixedMode ? '📌 固定悬浮窗已开启-ON' : '🖐 固定悬浮窗已关闭-OFF（可拖动 / 捏合）', () => {
         fixedMode = !fixedMode;
-        try { if (typeof GM_setValue === 'function') GM_setValue(FIXED_KEY, fixedMode); } catch (_) {}
+        saveSetting(FIXED_KEY, fixedMode);
         if (fixedMode) { freeView.x = 0; freeView.y = 0; freeView.s = 1; }
         registerMenu();
         pageToast(fixedMode ? '悬浮窗已固定' : '悬浮窗已解锁：单指拖动，双指捏合缩放');
         if (P) P.applyLayout();
       });
       if (id2 !== undefined) menuIds.push(id2);
-      const id3 = GM_registerMenuCommand(debugOn ? '🐞 调试已开启-ON' : '🐞 调试已关闭-OFF', () => {
+      const id3 = G.reg(debugOn ? '🐞 调试已开启-ON' : '🐞 调试已关闭-OFF', () => {
         debugOn = !debugOn;
-        try { if (typeof GM_setValue === 'function') GM_setValue(DEBUG_KEY, debugOn); } catch (_) {}
+        saveSetting(DEBUG_KEY, debugOn);
         if (!debugOn) plLog.length = 0;
         registerMenu();
         pageToast(debugOn ? '调试已开启：新打开的播放器会输出调试信息' : '调试已关闭');
@@ -289,10 +478,12 @@
     if (excludeDismissed) list = list.filter((i) => !dismissed.has(i.url));
     if (!list.length) return null;
     const lift = (it) => (it && it.type === 'hls' && parentOf(it.url)) || it; // 子清单 → 主清单（才有清晰度可选）
-    const pv = [...document.querySelectorAll('video')].find((v) => !v.paused && v.currentSrc);
+    const pv = allVideos().find((v) => !v.paused && v.currentSrc);
     if (pv) { const it = list.find((i) => i.url === pv.currentSrc); if (it) return lift(it); }
-    list.sort((a, b) => b.t - a.t);
-    return lift(list.find((i) => i.type === 'hls') || list[0]);
+    const strong = list.filter((i) => !i.weak && !i.preview); // 手动点小球：优先真实请求到的源，弱来源垫底
+    const pool = strong.length ? strong : list;
+    pool.sort((a, b) => b.t - a.t);
+    return lift(pool.find((i) => i.type === 'hls') || pool[0]);
   }
 
   function shortName(url) {
@@ -314,7 +505,7 @@
     const now = Date.now();
     const keep = new Set();
     if (P) keep.add(P.current.url);
-    document.querySelectorAll('video').forEach((v) => { if (!v.paused && v.currentSrc) keep.add(v.currentSrc); });
+    allVideos().forEach((v) => { if (!v.paused && v.currentSrc) keep.add(v.currentSrc); });
     // 保留：正在播放的、以及刚冒出来（1.5 秒内，可能是新页面预取的）的地址
     [...found.values()].forEach((it) => { if (!keep.has(it.url) && now - it.t > 1500) found.delete(it.url); });
     dismissed.clear();
@@ -335,7 +526,7 @@
   /* =========================================================
    * 2. hls.js 懒加载 + 网络层（GM_xmlhttpRequest 加载器、播放列表缓存）
    * =======================================================*/
-  const hasGM = () => typeof GM_xmlhttpRequest === 'function';
+  const hasGM = () => !!G.xhr;
   // 网络层选择规则（没有任何自动切换）：
   //   流地址或来源页与当前页面不同源 → 一律走 GM_xmlhttpRequest（带来源页 Referer，绕过 CORS）；
   //   同源 → 一律走原生 XHR / fetch。
@@ -347,6 +538,7 @@
 
   function getGlobalHls() {
     try { if (window.Hls) return window.Hls; } catch (_) {}
+    try { if (W.Hls) return W.Hls; } catch (_) {}
     try { if (typeof unsafeWindow !== 'undefined' && unsafeWindow.Hls) return unsafeWindow.Hls; } catch (_) {}
     try { if (typeof globalThis !== 'undefined' && globalThis.Hls) return globalThis.Hls; } catch (_) {}
     return null;
@@ -363,14 +555,30 @@
       } catch (_) { resolve(); }
     });
   }
+  // 读 @resource：旧式 GM_getResourceText → GM.getResourceText → GM4 的 GM.getResourceUrl（data: / blob: 地址解码）
+  async function gmResourceText(name) {
+    try { if (typeof GM_getResourceText === 'function') { const t = GM_getResourceText(name); if (t) return t; } } catch (_) {}
+    try { if (GMo && typeof GMo.getResourceText === 'function') { const t = await GMo.getResourceText(name); if (t) return t; } } catch (_) {}
+    try {
+      if (GMo && typeof GMo.getResourceUrl === 'function') {
+        const u = await GMo.getResourceUrl(name);
+        if (u && /^data:/i.test(u)) {
+          const i = u.indexOf(','), meta = u.slice(0, i), body = u.slice(i + 1);
+          if (/;base64/i.test(meta)) return new TextDecoder('utf-8').decode(new Uint8Array(base64ToBuf(body)));
+          return decodeURIComponent(body);
+        }
+        if (u && rawFetch) { const r = await rawFetch.call(W, u); return await r.text(); }
+      }
+    } catch (_) {}
+    return '';
+  }
   let hlsPromise = null;
   function loadHls() {
     if (hlsPromise) return hlsPromise;
     hlsPromise = (async () => {
       let H = getGlobalHls();
       if (H) return H;
-      let code = '';
-      try { if (typeof GM_getResourceText === 'function') code = GM_getResourceText('hlsjs') || ''; } catch (_) {}
+      let code = await gmResourceText('hlsjs');
       // 1) @resource 文本，在脚本环境里按 CommonJS 方式执行
       if (code) {
         try {
@@ -432,7 +640,7 @@
     };
     if (o.type === 'arraybuffer') req.responseType = 'arraybuffer';
     else if (o.type === 'binstr') req.overrideMimeType = 'text/plain; charset=x-user-defined';
-    return GM_xmlhttpRequest(req);
+    return G.xhr(req);
   }
   function gmText(url, ref) {
     return new Promise((resolve) => {
@@ -453,7 +661,7 @@
     const ac = typeof AbortController === 'function' ? new AbortController() : null;
     const tm = setTimeout(() => { if (ac) ac.abort(); }, ms || 6000);
     try {
-      const r = await rawFetch.call(window, url, ac ? { signal: ac.signal } : undefined);
+      const r = await rawFetch.call(W, url, ac ? { signal: ac.signal } : undefined);
       if (!r.ok) return null;
       return await r.text();
     } catch (_) { return null; } finally { clearTimeout(tm); }
@@ -1047,6 +1255,23 @@
 .iosgp-src-box { max-height: calc(150px * var(--iosgp-scale, 1)); overflow-y: auto; overflow-x: hidden; overscroll-behavior: contain; -webkit-overflow-scrolling: touch; }
 .iosgp-menu-src { display: block; width: 100%; min-width: 0; box-sizing: border-box; text-align: left; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; flex: none; }
 .iosgp-menu-src.iosgp-on { background: rgba(255,255,255,.22); }
+/* —— 窗口偏矮时（超宽电影）：中间按钮缩小，避免和进度条挤在一起 —— */
+.iosgp-compact .iosgp-center { gap: 18px; top: 44%; }
+.iosgp-compact .iosgp-btn-play { width: 52px; height: 52px; }
+.iosgp-compact .iosgp-btn-play svg { width: 26px; height: 26px; }
+.iosgp-compact .iosgp-btn-skip { width: 42px; height: 42px; }
+.iosgp-compact .iosgp-btn-skip svg { width: 23px; height: 23px; }
+/* —— 页内小窗（浏览器不支持系统画中画时的替代）：只留 ✕ 和「还原」，点画面播放 / 暂停，可拖动 —— */
+.iosgp-btn.iosgp-mini-only { display: none; }
+.iosgp-wrapper.iosgp-mini { border-radius: 12px; touch-action: none; }
+.iosgp-mini .iosgp-btn.iosgp-mini-only { display: flex; }
+.iosgp-mini .iosgp-center, .iosgp-mini .iosgp-bottom, .iosgp-mini .iosgp-corner-actions, .iosgp-mini .iosgp-corner-actions-left,
+.iosgp-mini .iosgp-menu-wrap, .iosgp-mini .iosgp-speed-pop, .iosgp-mini .iosgp-scrim { display: none !important; }
+.iosgp-mini .iosgp-corner-btn { width: 28px; height: 28px; }
+.iosgp-mini .iosgp-corner-btn svg { width: 14px; height: 14px; }
+.iosgp-mini .iosgp-top-actions-left { left: 6px; top: 6px; }
+.iosgp-mini .iosgp-top-actions-right { right: 6px; top: 6px; }
+.iosgp-mini .iosgp-toast { top: 40px; font-size: 11px; }
 .iosgp-spin { position: absolute; left: 50%; top: 50%; width: 36px; height: 36px; margin: -18px 0 0 -18px; border-radius: 50%;
   border: 3px solid rgba(255,255,255,.25); border-top-color: #fff; animation: iosgp-spin .8s linear infinite; display: none; pointer-events: none; z-index: 3; }
 .iosgp-spin.iosgp-show { display: block; }
@@ -1118,6 +1343,9 @@
       <path d="M13 17.5l-1 1a4 4 0 0 1-5.5-5.5l1.5-1.5"/>
     </svg>`
   };
+  ICONS.expand = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 4h6v6"/><path d="M20 4l-7 7"/><path d="M10 20H4v-6"/><path d="M4 20l7-7"/></svg>`;
+  ICONS.cast = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 8V6a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2h-5"/><path d="M3 12a8 8 0 0 1 8 8"/><path d="M3 16a4 4 0 0 1 4 4"/><circle cx="3.5" cy="19.5" r=".8" fill="currentColor"/></svg>`;
+  ICONS.ext = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M14 4h6v6"/><path d="M20 4l-9 9"/><path d="M18 14v4a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4"/></svg>`;
   ICONS.close = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><path d="M6 6l12 12M18 6L6 18"/></svg>`;
 
   /* =========================================================
@@ -1238,7 +1466,7 @@
   const HOST_STYLE_FS = 'all:initial;position:fixed;inset:0;width:100vw;height:100dvh;z-index:2147483647;display:block;background:#000;';
 
   async function copyText(text) {
-    if (typeof GM_setClipboard !== 'undefined') { try { GM_setClipboard(text, 'text'); return true; } catch (_) {} }
+    if (G.clip) { try { await G.clip(text, 'text'); return true; } catch (_) {} }
     try { await navigator.clipboard.writeText(text); return true; } catch (_) {}
     try {
       const ta = document.createElement('textarea');
@@ -1265,13 +1493,20 @@
     const host = document.createElement('div');
     host.setAttribute('data-mf-float-player', '');
     host.style.cssText = HOST_BASE + 'top:8px;width:min(94vw,560px);transform:translateX(-50%);';
-    const root = host.attachShadow({ mode: 'closed' }); // closed：页面脚本拿不到播放器内部
+    let root;
+    selfAttach = true;
+    try { root = host.attachShadow({ mode: 'closed' }); } finally { selfAttach = false; } // closed：页面脚本拿不到播放器内部
     root.innerHTML = `<style>${CSS_TEXT}${EXTRA_CSS}</style>
       <div class="iosgp-wrapper"><video playsinline webkit-playsinline preload="metadata"></video></div>`;
     const wrapper = root.querySelector('.iosgp-wrapper');
     const video = root.querySelector('video');
     const refs = buildControls();
     wrapper.appendChild(refs.controls);
+    const castItem = makeMenuItem(ICONS.cast, '投屏');
+    const extItem = makeMenuItem(ICONS.ext, '外部播放器打开');
+    refs.copyItem.after(castItem, extItem);
+    const restoreBtn = makeButton('iosgp-btn iosgp-corner-btn iosgp-mini-only', ICONS.expand, '还原');
+    refs.controls.querySelector('.iosgp-top-actions-right').appendChild(restoreBtn);
     const {
       controls, backBtn, playBtn, fwdBtn, track, buffered, filled, thumb, curTime, durTime, pipBtn, fullscreenBtn,
       muteBtn, closeBtn, returnBtn, moreBtn, menu, downloadItem, copyItem, speedBtn, speedPop, speedGrid, qualityLabel, qualityBox,
@@ -1281,6 +1516,9 @@
     const me = { host, video, hls: null, current: item, closed: false, applyLayout: () => applyLayout() };
     P = me;
     const cleanups = [];
+    let mini = false; // 页内小窗模式
+    const miniPos = { r: 10, b: 90 };
+    let miniWidth = 'min(54vw, 280px)';
     const onDoc = (ev, fn) => { document.addEventListener(ev, fn); cleanups.push(() => document.removeEventListener(ev, fn)); };
     document.documentElement.appendChild(host);
     refreshBall();
@@ -1296,7 +1534,7 @@
     let hideTimer = 0;
     const scheduleHide = () => {
       clearTimeout(hideTimer);
-      hideTimer = setTimeout(() => { if (!video.paused && !menu.classList.contains('iosgp-menu-open') && !speedPop.classList.contains('iosgp-open')) controls.classList.remove('iosgp-visible'); }, HIDE_DELAY);
+      hideTimer = setTimeout(() => { if (!mini && !video.paused && !menu.classList.contains('iosgp-menu-open') && !speedPop.classList.contains('iosgp-open')) controls.classList.remove('iosgp-visible'); }, HIDE_DELAY);
     };
     const showControls = () => { controls.classList.add('iosgp-visible'); scheduleHide(); };
     const hideControlsNow = () => { clearTimeout(hideTimer); controls.classList.remove('iosgp-visible'); };
@@ -1312,6 +1550,7 @@
       if (suppressClick) return;
       if (lpFired) { lpFired = false; return; }
       closePopups();
+      if (mini) { video.paused ? video.play().catch(() => {}) : video.pause(); return; }
       const now = Date.now();
       if (now - lastTap < 280 && Math.abs(e.clientX - lastTapX) < 90) {
         clearTimeout(tapTimer); lastTap = 0;
@@ -1445,12 +1684,35 @@
       else if (e.key === 'ArrowLeft') { video.currentTime = clamp(video.currentTime - SEEK_STEP, 0, d); e.preventDefault(); }
     });
 
-    /* ---- 画中画 ---- */
-    if (!(document.pictureInPictureEnabled && !video.disablePictureInPicture)) pipBtn.style.display = 'none';
-    else pipBtn.addEventListener('click', async (e) => {
+    /* ---- 画中画：系统画中画 → iOS 的 webkit 画中画 → 页内小窗（WebView 不支持时） ---- */
+    try { video.disablePictureInPicture = false; video.removeAttribute('disablepictureinpicture'); } catch (_) {}
+    const nativePip = () => !!(document.pictureInPictureEnabled && typeof video.requestPictureInPicture === 'function');
+    const webkitPip = () => { try { return typeof video.webkitSetPresentationMode === 'function' && (!video.webkitSupportsPresentationMode || video.webkitSupportsPresentationMode('picture-in-picture')); } catch (_) { return false; } };
+    function setMini(on) {
+      if (on === mini || me.closed) return;
+      mini = on;
+      wrapper.classList.toggle('iosgp-mini', on);
+      closePopups();
+      clearTimeout(hideTimer);
+      controls.classList.add('iosgp-visible');
+      if (on) sendDl('close');
+      applyLayout();
+      if (!on) { sendDl('reposition'); scheduleHide(); }
+    }
+    pipBtn.addEventListener('click', async (e) => {
       e.stopPropagation();
-      try { document.pictureInPictureElement === video ? await document.exitPictureInPicture() : await video.requestPictureInPicture(); } catch (_) {}
+      try {
+        if (document.pictureInPictureElement === video) { await document.exitPictureInPicture(); return; }
+        if (webkitPip() && video.webkitPresentationMode === 'picture-in-picture') { video.webkitSetPresentationMode('inline'); return; }
+        if (nativePip() && !video.disablePictureInPicture) {
+          try { await video.requestPictureInPicture(); return; } catch (err) { dbg('系统画中画失败：' + (err && err.name)); }
+        }
+        if (webkitPip()) { try { video.webkitSetPresentationMode('picture-in-picture'); return; } catch (_) {} }
+      } catch (_) {}
+      pageToast('当前浏览器不支持系统画中画，已切换为页内小窗（点画面播放 / 暂停，可拖动）');
+      setMini(true);
     });
+    restoreBtn.addEventListener('click', (e) => { e.stopPropagation(); setMini(false); });
 
     /* ---- 全屏：对 host 请求全屏（Shadow DOM 里的播放器整体进入全屏） ---- */
     const isFs = () => document.fullscreenElement === host || document.webkitFullscreenElement === host;
@@ -1490,9 +1752,11 @@
     function applyAspect() {
       const vw = video.videoWidth, vh = video.videoHeight;
       if (!vw || !vh || isFs()) return;
-      const ratio = vw / vh;
+      // 窗口最宽按 16:9：超宽电影（2.35:1 等）上下留黑边，保证控制按钮有足够空间
+      const ratio = Math.min(vw / vh, 16 / 9);
       wrapper.style.aspectRatio = String(ratio);
       hostWidth = `min(94vw, 560px, calc(62vh * ${ratio.toFixed(4)}))`;
+      miniWidth = `min(54vw, 280px, calc(36vh * ${ratio.toFixed(4)}))`;
       applyLayout();
     }
     video.addEventListener('loadedmetadata', applyAspect);
@@ -1501,6 +1765,11 @@
     function applyLayout() {
       if (!P || P.closed) return;
       if (isFs()) { host.style.cssText = HOST_STYLE_FS; return; }
+      if (mini) {
+        host.style.cssText = `all:initial;position:fixed;z-index:2147483646;display:block;right:${miniPos.r}px;bottom:${miniPos.b}px;width:${miniWidth};`;
+        wrapper.style.touchAction = 'none';
+        return;
+      }
       const free = !fixedMode;
       const top = free ? `calc(max(8px, env(safe-area-inset-top)) + ${freeView.y}px)` : 'max(8px, env(safe-area-inset-top))';
       const tx = free ? `calc(-50% + ${freeView.x}px)` : '-50%';
@@ -1522,7 +1791,7 @@
       else gesture = null;
     };
     wrapper.addEventListener('pointerdown', (e) => {
-      if (fixedMode || isFs() || noGesture(e)) return;
+      if (fixedMode || mini || isFs() || noGesture(e)) return;
       ptrs.set(e.pointerId, { x: e.clientX, y: e.clientY });
       try { wrapper.setPointerCapture(e.pointerId); } catch (_) {}
       beginGesture();
@@ -1555,6 +1824,31 @@
     };
     wrapper.addEventListener('pointerup', endPointer);
     wrapper.addEventListener('pointercancel', endPointer);
+
+    /* ---- 页内小窗：单指拖动 ---- */
+    let md = null;
+    wrapper.addEventListener('pointerdown', (e) => {
+      if (!mini || (e.pointerType === 'mouse' && e.button !== 0) || noGesture(e)) return;
+      md = { id: e.pointerId, sx: e.clientX, sy: e.clientY, r0: miniPos.r, b0: miniPos.b, moved: false };
+      try { wrapper.setPointerCapture(e.pointerId); } catch (_) {}
+    });
+    wrapper.addEventListener('pointermove', (e) => {
+      if (!md || e.pointerId !== md.id) return;
+      const dx = e.clientX - md.sx, dy = e.clientY - md.sy;
+      if (!md.moved && Math.hypot(dx, dy) < 8) return;
+      md.moved = true; suppressClick = true;
+      miniPos.r = clamp(md.r0 - dx, 0, Math.max(0, innerWidth - host.offsetWidth));
+      miniPos.b = clamp(md.b0 - dy, 0, Math.max(0, innerHeight - host.offsetHeight));
+      applyLayout();
+    });
+    const endMini = (e) => {
+      if (!md || e.pointerId !== md.id) return;
+      try { wrapper.releasePointerCapture(e.pointerId); } catch (_) {}
+      const moved = md.moved; md = null;
+      if (moved) setTimeout(() => { suppressClick = false; }, 60);
+    };
+    wrapper.addEventListener('pointerup', endMini);
+    wrapper.addEventListener('pointercancel', endMini);
 
     /* ---- 更多菜单 ---- */
     const closeMenu = () => { menu.classList.remove('iosgp-menu-open'); root.removeEventListener('click', closeMenu); };
@@ -1664,9 +1958,9 @@
       let name = 'video.mp4';
       try { name = decodeURIComponent(new URL(cur.url).pathname.split('/').pop() || '') || name; } catch (_) {}
       if (!/\.[a-z0-9]{2,5}$/i.test(name)) name += '.mp4';
-      if (typeof GM_download === 'function') {
+      if (G.dl) {
         try {
-          GM_download({
+          G.dl({
             url: cur.url, name, saveAs: false, headers: cur.ref ? { Referer: cur.ref } : undefined,
             onerror: () => anchorDownload(cur.url, name),
             ontimeout: () => anchorDownload(cur.url, name)
@@ -1681,6 +1975,7 @@
     const ro = new ResizeObserver(([entry]) => {
       const scale = Math.max(0.85, Math.min(entry.contentRect.width / 480, 1.25));
       controls.style.setProperty('--iosgp-scale', scale.toFixed(3));
+      controls.classList.toggle('iosgp-compact', entry.contentRect.height < 230);
     });
     ro.observe(wrapper);
 
@@ -1792,6 +2087,49 @@
       if (autoplay) video.play().catch(() => {});
     }
 
+    /* ---- 投屏：AirPlay → Remote Playback（Chromium 系 Cast）→ 外部播放器 / 投屏 App ---- */
+    async function openExternal(it) {
+      const ok = await copyText(it.url);
+      if (/Android/i.test(navigator.userAgent)) {
+        try {
+          const u = new URL(it.url), mime = it.type === 'hls' ? 'application/x-mpegURL' : 'video/*';
+          const a = document.createElement('a');
+          a.href = `intent://${u.host}${u.pathname}${u.search}#Intent;scheme=${u.protocol.replace(':', '')};action=android.intent.action.VIEW;type=${mime};end`;
+          document.body.appendChild(a); a.click(); a.remove();
+          toast((ok ? '链接已复制，' : '') + '正在调起外部播放器 / 投屏 App（防盗链源可能无法播放）', 3600);
+          return;
+        } catch (_) {}
+      }
+      toast((ok ? '链接已复制' : '复制失败') + '，可粘贴到投屏 App 或外部播放器', 3600);
+    }
+    castItem.addEventListener('click', async (e) => {
+      e.stopPropagation(); closeMenu();
+      const cur = me.current;
+      try {
+        if (typeof video.webkitShowPlaybackTargetPicker === 'function') { video.webkitShowPlaybackTargetPicker(); return; } // AirPlay
+        const r = video.remote;
+        if (r && typeof r.prompt === 'function') {
+          video.disableRemotePlayback = false; video.removeAttribute('disableremoteplayback');
+          if (me.hls) { // hls.js 走 MSE，不能直接投：浏览器原生支持 HLS 时临时改回原生播放再投
+            if (!video.canPlayType('application/vnd.apple.mpegurl')) { const err = new Error('mse'); err.name = 'NotSupportedError'; throw err; }
+            startTime = video.currentTime; destroyHls(); triedNative = true;
+            const wasPlaying = !video.paused;
+            video.src = cur.url; if (wasPlaying) video.play().catch(() => {});
+          }
+          await r.prompt();
+          toast('已选择投屏设备', 1800);
+          return;
+        }
+      } catch (err) {
+        const n = err && err.name;
+        if (n === 'NotAllowedError') return; // 用户取消
+        if (n === 'NotFoundError') { toast('附近没有发现可投屏的设备'); return; }
+      }
+      toast('当前浏览器不支持直接投屏，改用外部播放器 / 投屏 App', 2200);
+      openExternal(cur);
+    });
+    extItem.addEventListener('click', (e) => { e.stopPropagation(); closeMenu(); openExternal(me.current); });
+
     /* ---- 联动 M3U8 下载器：让它的面板出现在悬浮窗正下方 ---- */
     let dlShown = false;
     function sendDl(type) {
@@ -1836,12 +2174,13 @@
   /* =========================================================
    * 8. 自动悬浮 + 手动入口小球
    * =======================================================*/
-  const MIN_AUTO_SECONDS = 45; // 仅用于「无 HLS、只有一个直链文件」的情形：短于该时长不自动悬浮（手动点小球不受限）
+  const MIN_AUTO_SECONDS = 45; // 自动悬浮的最短时长：短于它的一律视为预览 / 动图 / 短片，不自动悬浮（手动点小球不受限）
+  const MIN_PREVIEW_W = 200, MIN_PREVIEW_H = 112; // 页面里小于这个尺寸的 <video> 视为缩略预览
 
   // 页面里已加载好的 <video> 的时长（不发任何请求），按地址取
   function loadedDuration(url) {
-    for (const v of document.querySelectorAll('video')) {
-      if (v.currentSrc === url && isFinite(v.duration) && v.duration > 0) return v.duration;
+    for (const v of allVideos()) {
+      if ((v.currentSrc === url || v.src === url) && isFinite(v.duration) && v.duration > 0) return v.duration;
     }
     return null;
   }
@@ -1925,7 +2264,7 @@
   function probeDuration(it) {
     if (it._dur !== undefined) return Promise.resolve(it._dur);
     if (it.type !== 'hls') return Promise.resolve((it._dur = null));
-    for (const v of document.querySelectorAll('video')) {
+    for (const v of allVideos()) {
       if (v.currentSrc === it.url && isFinite(v.duration) && v.duration > 0) return Promise.resolve((it._dur = v.duration));
     }
     if (it._probe) return it._probe;
@@ -1944,35 +2283,70 @@
   }
 
   let autoTimer = 0, autoProbing = false;
+
+  // <video> 是不是「缩略预览 / 动图 / 装饰背景」：带 loop，或尺寸明显偏小
+  function isPreviewEl(v) {
+    try {
+      if (v.loop) return true;
+      const r = v.getBoundingClientRect();
+      if (r.width > 0 && r.height > 0 && (r.width < MIN_PREVIEW_W || r.height < MIN_PREVIEW_H)) return true;
+    } catch (_) {}
+    return false;
+  }
+  function ownerVideo(url) {
+    for (const v of allVideos()) {
+      try {
+        if (v.currentSrc === url || v.src === url) return v;
+        for (const s of v.querySelectorAll('source')) if (s.src === url) return v;
+      } catch (_) {}
+    }
+    return null;
+  }
+  // 页面上有没有一个像样的主播放器（够大、不循环）：用于时长未知的直播 / 探测失败的 HLS
+  function hasMainVideo() {
+    return allVideos().some((v) => {
+      try {
+        if (v.loop) return false;
+        const r = v.getBoundingClientRect();
+        return r.width >= 240 && r.height >= 135;
+      } catch (_) { return false; }
+    });
+  }
+  const durOf = (it) => (it._dur != null ? it._dur : loadedDuration(it.url));
+
+  // 这个地址够不够格自动悬浮：真实来源、不是预览、时长 ≥ MIN_AUTO_SECONDS
+  async function qualifies(it) {
+    if (it.weak || it.preview || dismissed.has(it.url)) return false;
+    const v = ownerVideo(it.url);
+    if (v && isPreviewEl(v)) return false;
+    let d = it.type === 'hls' ? await probeDuration(it) : loadedDuration(it.url);
+    if (d == null && v && isFinite(v.duration) && v.duration > 0) d = v.duration;
+    if (d != null) return d >= MIN_AUTO_SECONDS;
+    // 时长拿不到：只有 HLS（直播 / 探测失败）且页面上确有主播放器时才放行；直链文件拿不到时长一律不弹
+    return it.type === 'hls' && hasMainVideo();
+  }
+
   async function autoDecide() {
+    if (!autoFloat || P || document.hidden) return;
+    let cands = [...found.values()].filter((i) => !i.weak && !i.preview && !dismissed.has(i.url)).sort((x, y) => y.t - x.t);
+    // 先探测 HLS 时长（只拉播放列表），顺便识别主清单 / 子清单
+    await Promise.all(cands.filter((i) => i.type === 'hls').slice(0, 6).map(probeDuration));
     if (!autoFloat || P) return;
-    const hlsList = () => [...found.values()].filter((i) => i.type === 'hls' && !dismissed.has(i.url)).sort((x, y) => y.t - x.t);
-    let list = hlsList();
-
-    // 1) 页面上只有一个 HLS：不管旁边有多少直链文件（多半是预览页的动态短视频），直接弹这个 HLS
-    if (list.length === 1) { openPlayer(list[0], { autoplay: false }); return; }
-
-    // 2) 多个 HLS：可能是同一个视频的主清单 / 子清单，探测时长去重（文件源不探测）；去重后仍只有一个才弹
-    if (list.length > 1) {
-      await Promise.all(list.slice(0, 6).map(probeDuration));
-      if (!autoFloat || P) return;
-      list = hlsList().filter((i) => !hasParent(i)); // 主清单的子清单不算独立视频
-      const known = list.filter((i) => i._dur != null).map((i) => i._dur);
-      const unknown = list.length - known.length; // 直播 / 探测失败 / 没探测的，各算一个
-      if (list.length && distinctCount(known) + unknown === 1) openPlayer(list[0], { autoplay: false });
-      return;
+    cands = cands.filter((i) => !hasParent(i)).slice(0, 10); // 主清单的子清单不算独立视频
+    const ok = [];
+    for (const it of cands) { if (await qualifies(it)) ok.push(it); }
+    if (!autoFloat || P) return;
+    // 时长相差 2 秒内视为同一个视频（主清单 / <video> 重复嗅探）；去重后恰好一个才弹
+    const groups = [];
+    for (const it of ok) {
+      const d = durOf(it);
+      if (d != null && groups.some((g) => g.d != null && Math.abs(g.d - d) <= 2)) continue;
+      groups.push({ it, d });
     }
-
-    // 3) 没有 HLS：只有一个直链文件，且页面里该 <video> 已经加载出 ≥45 秒的时长才弹；
-    //    其余情况（多个文件 / 时长未知 / 短视频）不打扰，交给用户点小球
-    const files = [...found.values()].filter((i) => !dismissed.has(i.url));
-    if (files.length === 1) {
-      const d = loadedDuration(files[0].url);
-      if (d != null && d >= MIN_AUTO_SECONDS) openPlayer(files[0], { autoplay: false });
-    }
+    if (groups.length === 1) openPlayer(groups[0].it, { autoplay: false });
   }
   function maybeAutoOpen() {
-    if (!IS_TOP || !autoFloat || P) return;
+    if (!IS_TOP || !settingsReady || !autoFloat || P) return;
     clearTimeout(autoTimer);
     // 稍作防抖：同一页面常常连续冒出好几个地址，等一下再统一判断
     autoTimer = setTimeout(async () => {
@@ -2017,9 +2391,9 @@
   }
 
   // 单个直链文件的时长要等 <video> 元数据加载出来才知道：加载完再判断一次
-  document.addEventListener('loadedmetadata', (e) => { if (e.target && e.target.tagName === 'VIDEO' && !P) maybeAutoOpen(); }, true);
+  document.addEventListener('visibilitychange', () => { if (!document.hidden && !P) maybeAutoOpen(); }); // 切回前台再判断一次
 
-  registerMenu();
+  loadSettings().then(() => { registerMenu(); maybeAutoOpen(); if (P) P.applyLayout(); });
   const initialScan = () => { scanAll(); refreshBall(); };
   if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', initialScan); else initialScan();
   window.addEventListener('load', initialScan);
