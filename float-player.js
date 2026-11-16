@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         悬浮媒体播放器
 // @namespace    https://github.com/520luo/js/float-player
-// @version      26.11.20
+// @version      26.11.16.2
 // @description  识别到媒体后自动在顶部悬浮播放器（默认暂停，可点 ✕ 关闭）；油猴菜单可开关「自动悬浮」「固定悬浮窗」；兼容 GM4 / 现代油猴引擎；可联动 M3U8 下载器；Mafari 内核专项适配：系统画中画 / DLNA 投屏 / 外部播放器
 // @icon         https://raw.githubusercontent.com/520LUO/icons/refs/heads/main/floatplayer.png
 // @author       520LUO
