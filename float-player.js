@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         悬浮媒体播放器
 // @namespace    https://github.com/520luo/js/float-player
-// @version      26.11.16
-// @description  识别到媒体后自动在顶部悬浮播放器（默认暂停，可点 ✕ 关闭）；油猴菜单可开关「自动悬浮」「固定悬浮窗」；兼容 GM4 / 现代油猴引擎；可联动 M3U8 下载器
+// @version      26.11.16.1
+// @description  识别到媒体后自动在顶部悬浮播放器（默认暂停，可点 ✕ 关闭）；油猴菜单可开关「自动悬浮」「固定悬浮窗」；兼容 GM4 / 现代油猴引擎；可联动 M3U8 下载器；Mafari 内核专项适配：系统画中画 / DLNA 投屏 / 外部播放器
 // @icon         https://raw.githubusercontent.com/520LUO/icons/refs/heads/main/floatplayer.png
 // @author       520LUO
 // @match        *://*/*
@@ -24,6 +24,8 @@
 // @grant        GM.setValue
 // @grant        GM.getResourceText
 // @grant        GM.getResourceUrl
+// @grant        GM_mafariHost
+// @grant        GM.mafariHost
 // @grant        unsafeWindow
 // @connect      *
 // @resource     hlsjs https://cdn.jsdelivr.net/npm/hls.js@1.5.17/dist/hls.min.js
@@ -83,6 +85,33 @@
       : (GMo && typeof GMo.download === 'function' ? (o) => GMo.download(o) : null)
   };
   let selfAttach = false; // 我们自己创建 Shadow DOM 时置位，避免被 attachShadow 钩子当成页面的播放器
+
+  /* =========================================================
+   * Mafari 宿主适配层（GM_mafariHost）
+   * Mafari 的两个内核（WebView / Gecko）都没有系统画中画，也没有 Remote Playback（Cast）。
+   * 它的内置运行时额外提供 GM_mafariHost(op, args, onEvent) → Promise，由 App 原生侧实现：
+   *   caps      能力探测 → { api, engine, pip, cast, ext }
+   *   sub       订阅宿主事件（画中画开 / 关、画中画里的按钮、投屏状态）
+   *   pip       进入系统画中画（要求播放器已全屏，这样小窗里只剩画面）
+   *   arm       上报「全屏播放中」：按 Home / 手势返回桌面时由原生自动进画中画
+   *   pipState  画中画里播放 / 暂停按钮的状态
+   *   cast      弹出投屏面板（DLNA 设备 / 系统投屏 / 外部播放器），状态经事件回来
+   *   castCtl   投屏中的 播放 / 暂停 / 跳转 / 停止
+   *   external  用外部播放器打开（带 Referer / UA 请求头）
+   *   release   播放器关闭
+   * 其它油猴引擎没有这个函数：全部返回 null，行为与原来完全一致。
+   * =======================================================*/
+  const MH_RAW = typeof GM_mafariHost === 'function' ? GM_mafariHost
+    : (GMo && typeof GMo.mafariHost === 'function' ? (a, b, c) => GMo.mafariHost(a, b, c) : null);
+  const MH = MH_RAW ? (op, args, onEvent) => {
+    try { return Promise.resolve(MH_RAW(op, args || {}, onEvent)).catch(() => null); } catch (_) { return Promise.resolve(null); }
+  } : null;
+  let hostCapsP = null, hostCaps = null;
+  function hostInit() {
+    if (!MH || !IS_TOP) return Promise.resolve(null);
+    if (!hostCapsP) hostCapsP = MH('caps').then((r) => (hostCaps = r && r.api >= 1 ? r : null));
+    return hostCapsP;
+  }
 
   const HLS_RE = /(?:\.m3u8(?=$|[?&#=\/;,])|[?&;](?:format|type|ext|fmt|f)=(?:m3u8|hls)(?=$|[&#;]))/i;
   const FILE_RE = /(?:\.(?:mp4|m4v|webm|mov|ogv)(?=$|[?&#=\/;,])|[?&;](?:format|type|ext|fmt|f)=(?:mp4|webm)(?=$|[&#;]))/i;
@@ -391,19 +420,21 @@
   const AUTO_KEY = 'mf_float_player_auto';
   const FIXED_KEY = 'mf_float_player_fixed';
   const DEBUG_KEY = 'mf_float_player_debug';
+  const AUTOPIP_KEY = 'mf_float_player_autopip';
   let autoFloat = true;
   let fixedMode = true; // 固定悬浮窗（默认开）；关闭后可单指拖动、双指捏合缩放
   let debugOn = false;
+  let autoPip = true; // Mafari：全屏播放时按 Home / 返回桌面，自动进入画中画
   let settingsReady = false; // GM4 的存取是异步的：设置读完之前不自动悬浮
   const saveSetting = (k, v) => { try { if (G.setValue) Promise.resolve(G.setValue(k, v)).catch(() => {}); } catch (_) {} };
   async function loadSettings() {
     const get = (k, d) => { try { return G.getValue ? Promise.resolve(G.getValue(k, d)).catch(() => d) : Promise.resolve(d); } catch (_) { return Promise.resolve(d); } };
     try {
       const r = await Promise.race([
-        Promise.all([get(AUTO_KEY, true), get(FIXED_KEY, true), get(DEBUG_KEY, false)]),
+        Promise.all([get(AUTO_KEY, true), get(FIXED_KEY, true), get(DEBUG_KEY, false), get(AUTOPIP_KEY, true)]),
         new Promise((res) => setTimeout(() => res(null), 2500))
       ]);
-      if (r) { autoFloat = r[0] !== false; fixedMode = r[1] !== false; debugOn = r[2] === true; }
+      if (r) { autoFloat = r[0] !== false; fixedMode = r[1] !== false; debugOn = r[2] === true; autoPip = r[3] !== false; }
     } catch (_) {}
     settingsReady = true;
   }
@@ -470,6 +501,16 @@
         pageToast(debugOn ? '调试已开启：新打开的播放器会输出调试信息' : '调试已关闭');
       });
       if (id3 !== undefined) menuIds.push(id3);
+      if (hostCaps && hostCaps.pip) { // 只有 Mafari 这类提供系统画中画的宿主才显示
+        const id4 = G.reg(autoPip ? '🪟 离开应用时自动画中画-ON' : '🪟 离开应用时自动画中画-OFF', () => {
+          autoPip = !autoPip;
+          saveSetting(AUTOPIP_KEY, autoPip);
+          registerMenu();
+          pageToast(autoPip ? '全屏播放时按 Home / 返回桌面，自动进入画中画' : '已关闭自动画中画');
+          if (P) P.syncHostArm();
+        });
+        if (id4 !== undefined) menuIds.push(id4);
+      }
     } catch (_) {}
   }
 
@@ -1280,6 +1321,8 @@
   line-height: 1.4; color: #fff; background: rgba(20,20,30,.82); display: none; max-width: 86%; text-align: center; z-index: 4;
   font-family: -apple-system, BlinkMacSystemFont, "PingFang SC", sans-serif; }
 .iosgp-toast.iosgp-show { display: block; }
+/* —— 宿主（原生）画中画：小窗里只留画面，播放 / 暂停等按钮由系统小窗的操作栏提供 —— */
+.iosgp-pip .iosgp-controls, .iosgp-pip .iosgp-toast, .iosgp-pip .iosgp-scrim, .iosgp-pip .iosgp-menu-wrap, .iosgp-pip .iosgp-speed-pop { display: none !important; }
 `;
 
   /* =========================================================
@@ -1513,10 +1556,15 @@
       sourceLabel, sourceBox, spin, toastEl
     } = refs;
 
-    const me = { host, video, hls: null, current: item, closed: false, applyLayout: () => applyLayout() };
+    const me = { host, video, hls: null, current: item, closed: false, applyLayout: () => applyLayout(), syncHostArm: () => syncHostArm() };
     P = me;
     const cleanups = [];
     let mini = false; // 页内小窗模式
+    // —— Mafari 宿主适配 ——
+    let hostPipOn = false;   // 已处于宿主（原生）画中画
+    let pipFsAuto = false;   // 为进画中画而临时进的全屏：画中画结束后退回
+    let armedKey = '';       // 最近一次上报给宿主的「全屏播放」状态
+    let casting = false, castInfo = null, castName = ''; // 投屏中：castInfo = { pos, dur, playing }
     const miniPos = { r: 10, b: 90 };
     let miniWidth = 'min(54vw, 280px)';
     const onDoc = (ev, fn) => { document.addEventListener(ev, fn); cleanups.push(() => document.removeEventListener(ev, fn)); };
@@ -1594,7 +1642,8 @@
 
     /* ---- 播放 / 暂停 ---- */
     const syncPlayState = () => {
-      const paused = video.paused || video.ended;
+      const paused = casting ? !(castInfo && castInfo.playing) : (video.paused || video.ended);
+      syncHostArm(); hostPush();
       playBtn.innerHTML = paused ? ICONS.play : ICONS.pause;
       playBtn.title = paused ? '播放' : '暂停';
       if (paused) { clearTimeout(hideTimer); controls.classList.add('iosgp-visible'); } else scheduleHide();
@@ -1607,7 +1656,7 @@
     video.addEventListener('pause', syncPlayState);
     video.addEventListener('ended', syncPlayState);
     syncPlayState();
-    playBtn.addEventListener('click', (e) => { e.stopPropagation(); video.paused ? video.play().catch(() => {}) : video.pause(); });
+    playBtn.addEventListener('click', (e) => { e.stopPropagation(); if (casting) { castCtl(castInfo && castInfo.playing ? 'pause' : 'play'); return; } video.paused ? video.play().catch(() => {}) : video.pause(); });
     video.addEventListener('waiting', () => spin.classList.add('iosgp-show'));
     for (const ev of ['playing', 'canplay', 'seeked', 'loadeddata']) video.addEventListener(ev, () => spin.classList.remove('iosgp-show'));
 
@@ -1645,11 +1694,17 @@
     syncMuteIcon();
 
     /* ---- 快进 / 快退 ---- */
-    backBtn.addEventListener('click', (e) => { e.stopPropagation(); seekBy(-SKIP_SECONDS); showControls(); });
-    fwdBtn.addEventListener('click', (e) => { e.stopPropagation(); seekBy(SKIP_SECONDS); showControls(); });
+    backBtn.addEventListener('click', (e) => { e.stopPropagation(); if (casting) castSeekBy(-SKIP_SECONDS); else seekBy(-SKIP_SECONDS); showControls(); });
+    fwdBtn.addEventListener('click', (e) => { e.stopPropagation(); if (casting) castSeekBy(SKIP_SECONDS); else seekBy(SKIP_SECONDS); showControls(); });
 
     /* ---- 进度条 ---- */
     const updateProgress = () => {
+      if (casting && castInfo && castInfo.dur > 0) { // 投屏中：进度条显示电视上的进度，本地视频保持暂停
+        const pct = clamp(castInfo.pos / castInfo.dur, 0, 1) * 100;
+        filled.style.width = pct + '%'; thumb.style.left = pct + '%';
+        curTime.textContent = fmt(castInfo.pos); durTime.textContent = fmt(castInfo.dur);
+        return;
+      }
       const d = video.duration;
       if (isFinite(d) && d > 0) {
         const pct = clamp(video.currentTime / d, 0, 1) * 100;
@@ -1667,12 +1722,16 @@
     const seekFromEvent = (e) => {
       const rect = track.getBoundingClientRect();
       const pct = clamp((e.clientX - rect.left) / rect.width, 0, 1), d = video.duration;
+      if (casting) {
+        if (castInfo && castInfo.dur > 0) { castInfo.pos = pct * castInfo.dur; updateProgress(); }
+        return;
+      }
       if (isFinite(d) && d > 0) {
         video.currentTime = pct * d;
         filled.style.width = pct * 100 + '%'; thumb.style.left = pct * 100 + '%'; curTime.textContent = fmt(video.currentTime);
       }
     };
-    const endDrag = (e) => { if (!dragging) return; dragging = false; track.classList.remove('iosgp-dragging'); try { track.releasePointerCapture(e.pointerId); } catch (_) {} };
+    const endDrag = (e) => { if (!dragging) return; dragging = false; if (casting && castInfo) castCtl('seek', castInfo.pos); track.classList.remove('iosgp-dragging'); try { track.releasePointerCapture(e.pointerId); } catch (_) {} };
     track.addEventListener('pointerdown', (e) => { e.stopPropagation(); dragging = true; track.classList.add('iosgp-dragging'); try { track.setPointerCapture(e.pointerId); } catch (_) {} seekFromEvent(e); showControls(); });
     track.addEventListener('pointermove', (e) => { if (dragging) seekFromEvent(e); });
     track.addEventListener('pointerup', endDrag);
@@ -1709,9 +1768,67 @@
         }
         if (webkitPip()) { try { video.webkitSetPresentationMode('picture-in-picture'); return; } catch (_) {} }
       } catch (_) {}
+      if (await hostPip()) return; // Mafari：全屏 + 原生系统画中画
       pageToast('当前浏览器不支持系统画中画，已切换为页内小窗（点画面播放 / 暂停，可拖动）');
       setMini(true);
     });
+
+    /* ---- Mafari 宿主：系统画中画 / 投屏 / 外部播放器（原生侧见 MediaHost.kt） ---- */
+    const nap = (ms) => new Promise((r) => setTimeout(r, ms));
+    const vSize = () => ({ w: video.videoWidth || 16, h: video.videoHeight || 9 });
+    function onHostEvent(ev) {
+      if (!ev || me.closed) return;
+      if (ev.ev === 'pip') {
+        hostPipOn = !!ev.on;
+        wrapper.classList.toggle('iosgp-pip', hostPipOn);
+        if (hostPipOn) { closePopups(); hideControlsNow(); }
+        else {
+          showControls();
+          if (pipFsAuto) { pipFsAuto = false; exitFs(); } // 点小窗还原：回到进画中画之前的悬浮窗
+        }
+      } else if (ev.ev === 'act') { // 系统小窗操作栏里的按钮
+        if (ev.a === 'play') video.play().catch(() => {});
+        else if (ev.a === 'pause') video.pause();
+        else if (ev.a === 'back') seekBy(-SKIP_SECONDS);
+        else if (ev.a === 'fwd') seekBy(SKIP_SECONDS);
+      } else if (ev.ev === 'cast') onCastEvent(ev);
+    }
+    // 把「全屏 + 正在播放」告诉宿主：按 Home / 手势返回桌面时，宿主自动进画中画
+    function syncHostArm() {
+      try {
+        if (!hostCaps || !hostCaps.pip || me.closed) return;
+        const on = autoPip && isFs() && !video.paused && !video.ended && !casting;
+        const { w, h } = vSize();
+        const key = on ? '1:' + w + 'x' + h : '0';
+        if (key === armedKey) return;
+        armedKey = key;
+        MH('arm', { on, w, h });
+      } catch (_) {}
+    }
+    function hostPush() { // 画中画小窗操作栏上的播放 / 暂停图标
+      try { if (hostCaps && hostCaps.pip && (hostPipOn || armedKey.charAt(0) === '1')) MH('pipState', { playing: !video.paused && !video.ended }); } catch (_) {}
+    }
+    async function hostPip() {
+      const c = await hostInit();
+      if (!c || !c.pip) return false;
+      // 宿主的画中画是「整个窗口缩成小窗」：先把播放器全屏，小窗里才只有画面
+      if (!isFs()) {
+        try {
+          if (host.requestFullscreen) { try { await host.requestFullscreen({ navigationUI: 'hide' }); } catch (_) { await host.requestFullscreen(); } }
+          else if (host.webkitRequestFullscreen) host.webkitRequestFullscreen();
+        } catch (_) {}
+        for (let i = 0; i < 15 && !isFs(); i++) await nap(60); // WebView 的 fullscreenchange 是异步的
+        if (!isFs()) return false;
+        pipFsAuto = true;
+      }
+      const { w, h } = vSize();
+      const r = await MH('pip', { w, h, playing: !video.paused && !video.ended });
+      if (r && r.ok) return true;
+      if (pipFsAuto) { pipFsAuto = false; exitFs(); }
+      return false;
+    }
+    video.addEventListener('loadedmetadata', syncHostArm);
+    video.addEventListener('resize', syncHostArm);
     restoreBtn.addEventListener('click', (e) => { e.stopPropagation(); setMini(false); });
 
     /* ---- 全屏：对 host 请求全屏（Shadow DOM 里的播放器整体进入全屏） ---- */
@@ -1725,6 +1842,7 @@
       returnBtn.style.display = fs ? 'flex' : 'none';
       fullscreenBtn.innerHTML = fs ? ICONS.fullscreenExit : ICONS.fullscreen;
       fullscreenBtn.title = fs ? '退出全屏' : '全屏';
+      syncHostArm();
       try {
         if (fs) {
           // 竖屏视频不强制横屏
@@ -2087,9 +2205,55 @@
       if (autoplay) video.play().catch(() => {});
     }
 
-    /* ---- 投屏：AirPlay → Remote Playback（Chromium 系 Cast）→ 外部播放器 / 投屏 App ---- */
+    /* ---- 投屏：AirPlay → 宿主（DLNA / 系统投屏）→ Remote Playback（Chromium 系 Cast）→ 外部播放器 / 投屏 App ---- */
+    function castPayload(it) {
+      let ck = '';
+      try { if (new URL(it.url).hostname === location.hostname) ck = document.cookie.slice(0, 4000); } catch (_) {} // 只给同域源带 Cookie
+      return {
+        url: it.url, type: it.type === 'hls' ? 'hls' : 'file', title: (document.title || shortName(it.url)).slice(0, 120),
+        referer: location.href, ua: navigator.userAgent, cookie: ck, pos: Math.floor(video.currentTime || 0)
+      };
+    }
+    const castLabel = castItem.querySelector('.iosgp-menu-label');
+    function setCastUi(on) {
+      if (castLabel) castLabel.textContent = on ? '停止投屏' + (castName ? '（' + castName + '）' : '') : '投屏';
+    }
+    const castCtl = (a, pos) => { if (hostCaps) MH('castCtl', pos === undefined ? { a } : { a, pos: Math.max(0, Math.floor(pos)) }); };
+    const castSeekBy = (d) => { if (castInfo) { castInfo.pos = clamp(castInfo.pos + d, 0, castInfo.dur || Infinity); updateProgress(); castCtl('seek', castInfo.pos); } };
+    function onCastEvent(ev) {
+      if (ev.state === 'playing') {
+        if (!casting) { // 开始投屏：本地视频停下，进度以电视为准
+          casting = true; castName = ev.name || ''; setCastUi(true);
+          try { video.pause(); } catch (_) {}
+          toast('已投屏到 ' + (castName || '电视') + '，本地播放已暂停', 3000);
+          syncHostArm();
+        }
+        castInfo = { pos: +ev.pos || 0, dur: +ev.dur || 0, playing: ev.playing !== false };
+        updateProgress(); syncPlayState();
+      } else if (ev.state === 'stopped' || ev.state === 'error') {
+        const last = castInfo ? castInfo.pos : 0, was = casting;
+        casting = false; castInfo = null; setCastUi(false);
+        if (ev.state === 'error') toast(ev.msg || '投屏失败', 3600);
+        else if (was) toast('投屏已结束', 2200);
+        if (was && last > 1) { try { video.currentTime = last; } catch (_) {} } // 本地从电视上的进度继续（保持暂停）
+        updateProgress(); syncPlayState();
+      } else if (ev.state === 'connecting') toast('正在连接 ' + (ev.name || '设备') + '…', 2400);
+    }
+    async function hostCast(it) {
+      const c = await hostInit();
+      if (!c || !c.cast) return false;
+      if (!/^https?:/i.test(it.url)) { toast('当前是本地流（blob / data），无法投屏，可先用「下载」再投'); return true; }
+      const r = await MH('cast', castPayload(it));
+      return !!(r && r.ok);
+    }
     async function openExternal(it) {
       const ok = await copyText(it.url);
+      const c = await hostInit();
+      if (c && c.ext) { // Mafari：原生拼 ACTION_VIEW（不带 BROWSABLE，带 Referer / UA 请求头），投屏 App / 播放器都能收到
+        const r = await MH('external', castPayload(it));
+        if (r && r.ok) { toast((ok ? '链接已复制，' : '') + '请选择外部播放器 / 投屏 App', 3000); return; }
+        if (r && r.error === 'no_app') { toast((ok ? '链接已复制，' : '') + '没有找到可用的播放器，可粘贴到投屏 App', 3600); return; }
+      }
       if (/Android/i.test(navigator.userAgent)) {
         try {
           const u = new URL(it.url), mime = it.type === 'hls' ? 'application/x-mpegURL' : 'video/*';
@@ -2104,9 +2268,11 @@
     }
     castItem.addEventListener('click', async (e) => {
       e.stopPropagation(); closeMenu();
+      if (casting) { castCtl('stop'); return; }
       const cur = me.current;
       try {
         if (typeof video.webkitShowPlaybackTargetPicker === 'function') { video.webkitShowPlaybackTargetPicker(); return; } // AirPlay
+        if (await hostCast(cur)) return; // Mafari：WebView / Gecko 都没有 Remote Playback，直接走原生投屏面板
         const r = video.remote;
         if (r && typeof r.prompt === 'function') {
           video.disableRemotePlayback = false; video.removeAttribute('disableremoteplayback');
@@ -2159,6 +2325,7 @@
       try { if (isFs()) document.exitFullscreen(); } catch (_) {}
       try { screen.orientation && screen.orientation.unlock && screen.orientation.unlock(); } catch (_) {}
       sendDl('close');
+      if (hostCaps) { try { if (casting) MH('castCtl', { a: 'stop' }); MH('release'); } catch (_) {} }
       host.remove();
       // 用户点 ✕：当前已识别的地址都不再自动悬浮（之后出现的新地址仍会）
       if (byUser) found.forEach((_, url) => dismissed.add(url));
@@ -2168,6 +2335,7 @@
     closeBtn.addEventListener('click', (e) => { e.stopPropagation(); close(true); });
     for (const ev of ['keydown', 'keyup', 'keypress']) host.addEventListener(ev, (e) => e.stopPropagation());
 
+    hostInit().then((c) => { if (c && !me.closed) { MH('sub', {}, onHostEvent); syncHostArm(); } });
     load(item, 0, !!opts.autoplay);
   }
 
@@ -2394,6 +2562,7 @@
   document.addEventListener('visibilitychange', () => { if (!document.hidden && !P) maybeAutoOpen(); }); // 切回前台再判断一次
 
   loadSettings().then(() => { registerMenu(); maybeAutoOpen(); if (P) P.applyLayout(); });
+  hostInit().then((c) => { if (c && c.pip) registerMenu(); }); // 能力探测是异步的：探测到画中画后补上菜单项
   const initialScan = () => { scanAll(); refreshBall(); };
   if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', initialScan); else initialScan();
   window.addEventListener('load', initialScan);
