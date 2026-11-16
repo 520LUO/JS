@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         悬浮媒体播放器
 // @namespace    https://github.com/520luo/js/float-player
-// @version      26.11.16.1
+// @version      26.11.20
 // @description  识别到媒体后自动在顶部悬浮播放器（默认暂停，可点 ✕ 关闭）；油猴菜单可开关「自动悬浮」「固定悬浮窗」；兼容 GM4 / 现代油猴引擎；可联动 M3U8 下载器；Mafari 内核专项适配：系统画中画 / DLNA 投屏 / 外部播放器
 // @icon         https://raw.githubusercontent.com/520LUO/icons/refs/heads/main/floatplayer.png
 // @author       520LUO
@@ -294,6 +294,106 @@
       proto.attachShadow = na;
     }
   } catch (_) {}
+
+  /* =========================================================
+   * 事件隔离：播放器 / 小球上的点击、触摸不能被页面的全局监听看到
+   * 很多网站在 window / document / body 上挂一个全局的 click / touchend / mousedown 监听（常在捕获阶段），
+   * 任意一次点击都会触发隐形广告层：window.open、重定向到垃圾站。播放器是页面里的普通元素，
+   * 点它的按钮 / 进度条，这些监听照样会收到。host 上的 stopPropagation 只能挡冒泡阶段，挡不住捕获阶段，
+   * 所以分两层：
+   *  1) 注册层：包装页面在 window / document / html / body 上注册的这类监听，事件来自我们的元素时直接跳过；
+   *     连 onclick = … 这种属性写法也一并包装。脚本在 document-start 运行，先于页面脚本。
+   *  2) 元素层：host / 小球自己在冒泡阶段拦住，防止被其它祖先节点上的监听收到。
+   * 只隔离「来自我们元素」的事件，页面其它地方的点击完全不受影响。
+   * =======================================================*/
+  const OURS = new WeakSet();
+  const ISO_EVTS = ['click', 'dblclick', 'auxclick', 'mousedown', 'mouseup', 'pointerdown', 'pointerup', 'pointercancel', 'touchstart', 'touchend', 'touchcancel', 'contextmenu'];
+  const ISO_SET = new Set(ISO_EVTS);
+  const isOurs = (e) => {
+    try {
+      const t = e && e.target;
+      if (t && OURS.has(t)) return true;
+      const path = e && e.composedPath && e.composedPath();
+      if (path) for (let i = 0; i < path.length; i++) if (OURS.has(path[i])) return true;
+    } catch (_) {}
+    return false;
+  };
+  function isolate(el) {
+    try {
+      OURS.add(el);
+      for (const ev of ISO_EVTS) el.addEventListener(ev, (e) => e.stopPropagation());
+    } catch (_) {}
+  }
+  if (IS_TOP) {
+    const isGlobalTarget = (t) => {
+      try { return t === W || t === window || t === document || (t && t.nodeType === 1 && (t === document.documentElement || t === document.body)); } catch (_) { return false; }
+    };
+    try {
+      const ET = W.EventTarget && W.EventTarget.prototype;
+      const rawAdd = ET && ET.addEventListener, rawRem = ET && ET.removeEventListener;
+      if (typeof rawAdd === 'function' && typeof rawRem === 'function' && !rawAdd.__mfIso) {
+        const wraps = new WeakMap(); // 页面的 listener -> Map(类型 + 阶段 -> 包装函数)，removeEventListener 要靠它找回
+        const keyOf = (type, opt) => type + ((opt === true || (opt && typeof opt === 'object' && opt.capture)) ? 'c' : 'b');
+        const wrapOf = (listener, type, opt, create) => {
+          let m = wraps.get(listener);
+          if (!m) { if (!create) return null; m = new Map(); wraps.set(listener, m); }
+          const k = keyOf(type, opt);
+          let w = m.get(k);
+          if (!w && create) {
+            w = function (e) {
+              if (isOurs(e)) return undefined;
+              return typeof listener === 'function' ? listener.call(this, e) : (listener.handleEvent ? listener.handleEvent(e) : undefined);
+            };
+            m.set(k, w);
+          }
+          return w || null;
+        };
+        const add = function (type, listener, opt) {
+          if (listener && ISO_SET.has(type) && (typeof listener === 'function' || typeof listener === 'object') && isGlobalTarget(this)) {
+            const w = wrapOf(listener, type, opt, true);
+            if (w) return rawAdd.call(this, type, w, opt);
+          }
+          return rawAdd.apply(this, arguments);
+        };
+        const rem = function (type, listener, opt) {
+          if (listener && ISO_SET.has(type) && (typeof listener === 'function' || typeof listener === 'object') && isGlobalTarget(this)) {
+            const w = wrapOf(listener, type, opt, false);
+            if (w) return rawRem.call(this, type, w, opt);
+          }
+          return rawRem.apply(this, arguments);
+        };
+        add.__mfIso = 1; rem.__mfIso = 1;
+        ET.addEventListener = add; ET.removeEventListener = rem;
+      }
+    } catch (_) {}
+    // onclick = fn 这种属性写法：只处理全局目标上的（window / document / html / body）
+    try {
+      const protos = [W.Window && W.Window.prototype, W.Document && W.Document.prototype, W.HTMLElement && W.HTMLElement.prototype].filter(Boolean);
+      for (const ev of ISO_EVTS) {
+        const prop = 'on' + ev;
+        const done = new Set();
+        for (const proto of [...protos, W]) {
+          let d = null;
+          try { d = Object.getOwnPropertyDescriptor(proto, prop); } catch (_) {}
+          if (!d || !d.set || !d.configurable || done.has(d.set)) continue;
+          done.add(d.set);
+          const rawSet = d.set, rawGet = d.get;
+          const store = new WeakMap(); // 目标 -> 页面原本赋的函数
+          try {
+            Object.defineProperty(proto, prop, {
+              configurable: true, enumerable: d.enumerable,
+              get: function () { return store.has(this) ? store.get(this) : (rawGet ? rawGet.call(this) : null); },
+              set: function (fn) {
+                if (!isGlobalTarget(this) || (typeof fn !== 'function' && fn !== null)) { store.delete(this); return rawSet.call(this, fn); }
+                store.set(this, fn);
+                rawSet.call(this, fn === null ? null : function (e) { if (isOurs(e)) return undefined; return fn.call(this, e); });
+              }
+            });
+          } catch (_) {}
+        }
+      }
+    } catch (_) {}
+  }
 
   // 网络钩子：fetch / XHR（同时挂在页面 window 与脚本 window 上，已挂过的不重复挂）
   function hookNet(w) {
@@ -1568,6 +1668,7 @@
     const miniPos = { r: 10, b: 90 };
     let miniWidth = 'min(54vw, 280px)';
     const onDoc = (ev, fn) => { document.addEventListener(ev, fn); cleanups.push(() => document.removeEventListener(ev, fn)); };
+    isolate(host);
     document.documentElement.appendChild(host);
     refreshBall();
 
@@ -2539,6 +2640,7 @@
     ball.innerHTML = '<svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor"><path d="M8 5.5v13l11-6.5z"/></svg>' +
       '<span style="position:absolute;top:-3px;right:-3px;min-width:16px;height:16px;padding:0 4px;box-sizing:border-box;border-radius:8px;background:#30d158;color:#fff;font:600 10px/16px system-ui,sans-serif;text-align:center"></span>';
     ballBadge = ball.querySelector('span');
+    isolate(ball);
     document.body.appendChild(ball);
     let drag = false, moved = false, sy = 0, sTop = 0;
     ball.addEventListener('pointerdown', (e) => { drag = true; moved = false; sy = e.clientY; sTop = ball.getBoundingClientRect().top; ball.setPointerCapture(e.pointerId); });
